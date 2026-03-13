@@ -27,9 +27,9 @@ from app.agents._eval_3_extractor import OCRMenuJudgeAgent
 from app.agents._0_orchestrator import MenuAgentOrchestrator
 from app.agents._eval_2_ocr import OCRAgent
 from app.agents._eval_1_img_preprocessor import ImagePreprocessAgent
-from app.agents.risk_assess_agent import RiskAssessAgent
-from app.agents.score_policy_agent import ScorePolicyAgent
-from app.agents.translate_agent import TranslateAgent
+from app.agents._eval_4_1_risk_assessor import RiskAssessAgent
+from app.agents._eval_4_2_score_policy import ScorePolicyAgent
+from app.agents._0_translate_agent import TranslateAgent
 
 __all__ = [
     "AvoidEvidence",

@@ -70,7 +70,6 @@ class RiskItem(BaseModel):
         default_factory=list,
         description="avoid 성분별 근거 목록",
     )
-    why_ko: str = Field("", description="짧은 한국어 근거")
 
 
 class RiskAssessInput(BaseModel):

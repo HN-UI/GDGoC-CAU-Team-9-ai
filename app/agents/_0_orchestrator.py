@@ -14,11 +14,11 @@ from app.agents._0_contracts import (
 from app.agents._chat_1_avoid_taker import AvoidIntakeAgent
 from app.agents.extract_agent import MenuExtractAgent
 from app.agents._eval_1_img_preprocessor import ImagePreprocessAgent
-from app.agents.risk_assess_agent import RiskAssessAgent
-from app.agents.score_policy_agent import ScorePolicyAgent
-from app.agents.translate_agent import TranslateAgent
+from app.agents._eval_4_1_risk_assessor import RiskAssessAgent
+from app.agents._eval_4_2_score_policy import ScorePolicyAgent
+from app.agents._0_translate_agent import TranslateAgent
 from app.clients.gemma_client import GemmaClient
-from app.utils.image_io import load_image_from_url
+from app.utils.image_io import load_image
 
 
 class MenuAgentOrchestrator:
@@ -54,10 +54,10 @@ class MenuAgentOrchestrator:
         # 1) Extract Agent
         t_image = time.perf_counter()
         try:
-            data, mime = load_image_from_url(image_url)
+            data, mime = load_image(image_url)
         except Exception as exc:
-            # 이미지 다운로드 실패는 API 레이어에서 400으로 매핑됨
-            raise ImageLoadError(f"failed to load image from url: {image_url}") from exc
+            # 로컬 파일/URL 로드 실패는 API 레이어에서 400으로 매핑됨
+            raise ImageLoadError(f"failed to load image from source: {image_url}") from exc
         timings_ms["image_load"] = self._elapsed_ms(t_image)
 
         t_preprocess = time.perf_counter()
@@ -110,6 +110,8 @@ class MenuAgentOrchestrator:
         for it in score_output.items:
             scored_items.append(it)
 
+        # menu는 사용자 언어 표시용으로 로컬라이즈하고, menu_original에는 원문을 유지한다.
+        self._localize_item_menus(scored_items, lang)
         # reason은 ScorePolicy에서 영어로 생성되므로, 최종 언어로 로컬라이즈한다.
         self._localize_item_reasons(scored_items, lang)
 
@@ -125,7 +127,6 @@ class MenuAgentOrchestrator:
         )
 
     def _fallback_score(self, items: List[str], lang: str = "ko"):
-        fallback_reason = "Risk assessment failed (conservative fallback)"
         # 모든 메뉴를 최악 위험(100)으로 처리해 안전 우선 정책을 적용
         fallback_risk_items = [
             RiskItem(
@@ -134,7 +135,7 @@ class MenuAgentOrchestrator:
                 confidence=0.0,
                 suspected_ingredients=[],
                 matched_avoid=[],
-                why_ko=fallback_reason,
+                avoid_evidence=[],
             )
             for menu in items
         ]
@@ -159,6 +160,51 @@ class MenuAgentOrchestrator:
     def _elapsed_ms(start_time: float) -> int:
         # perf_counter 기반 경과시간(ms) 계산
         return int(max(0, round((time.perf_counter() - start_time) * 1000)))
+
+    def _localize_item_menus(self, items: List[ScoredItem], lang: str) -> None:
+        target_lang = lang if lang in {"ko", "en", "cn"} else "en"
+        if not items:
+            return
+
+        for item in items:
+            if not item.menu_original:
+                item.menu_original = item.menu
+
+        if target_lang == "en":
+            return
+
+        translate_candidates = []
+        seen_menus = set()
+        for item in items:
+            original_menu = (item.menu_original or item.menu or "").strip()
+            if not original_menu or original_menu in seen_menus:
+                continue
+            seen_menus.add(original_menu)
+            translate_candidates.append(original_menu)
+
+        if not translate_candidates:
+            return
+
+        translated_map = {}
+        try:
+            translated = self.translate_only(
+                texts=translate_candidates,
+                source_lang="auto",
+                target_lang=target_lang,
+            )
+            for idx, src in enumerate(translate_candidates):
+                if idx >= len(translated.items):
+                    break
+                translated_text = (translated.items[idx].translated or "").strip()
+                if translated_text:
+                    translated_map[src] = translated_text
+        except Exception:
+            return
+
+        for item in items:
+            original_menu = (item.menu_original or item.menu or "").strip()
+            if original_menu in translated_map:
+                item.menu = translated_map[original_menu]
 
     def _localize_item_reasons(self, items: List[ScoredItem], lang: str) -> None:
         target_lang = lang if lang in {"ko", "en", "cn"} else "en"

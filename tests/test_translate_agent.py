@@ -1,7 +1,7 @@
 import unittest
 
 from app.agents._0_contracts import TranslateInput
-from app.agents.translate_agent import TranslateAgent
+from app.agents._0_translate_agent import TranslateAgent
 
 
 class FakeGemma:

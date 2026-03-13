@@ -1,7 +1,7 @@
 import unittest
 
 from app.agents._0_contracts import RiskAssessInput
-from app.agents.risk_assess_agent import RiskAssessAgent
+from app.agents._eval_4_1_risk_assessor import RiskAssessAgent
 
 
 class FakeGemma:

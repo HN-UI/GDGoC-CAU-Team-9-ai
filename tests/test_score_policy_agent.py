@@ -1,7 +1,7 @@
 import unittest
 
 from app.agents._0_contracts import AvoidEvidence, RiskItem, ScorePolicyInput
-from app.agents.score_policy_agent import ScorePolicyAgent
+from app.agents._eval_4_2_score_policy import ScorePolicyAgent
 
 
 class ScorePolicyAgentTest(unittest.TestCase):
