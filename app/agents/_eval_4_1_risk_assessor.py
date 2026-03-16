@@ -276,6 +276,14 @@ OUTPUT: Return ONLY valid JSON (no markdown) with this schema:
                 # no-match 상황에서 과도한 prior risk가 들어오면 완화
                 risk = min(risk, 35)
 
+            why = it.get("why_ko", "")
+            if not isinstance(why, str):
+                why = ""
+            if not why.strip() and not avoid_evidence:
+                why = "뚜렷한 기피 재료는 확인되지 않았어요."
+            if not avoid_evidence:
+                why = "뚜렷한 기피 재료는 확인되지 않았어요."
+
             by_menu[menu] = (
                 RiskItem(
                     menu=menu,

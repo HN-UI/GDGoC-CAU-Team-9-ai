@@ -212,14 +212,14 @@ class MenuAgentOrchestrator:
             return
 
         no_match_reason = {
-            "ko": "기피 재료 근거 부족",
-            "en": "Insufficient avoid-ingredient evidence",
-            "cn": "缺乏忌口成分依据",
+            "ko": "뚜렷한 기피 재료는 확인되지 않았어요. 다만 정보가 부족해 점수는 보수적으로 계산했어요.",
+            "en": "We could not clearly confirm any avoid ingredients. Since the information is limited, the score was calculated conservatively.",
+            "cn": "暂未明确发现忌口成分，但由于信息有限，分数已按保守方式计算。",
         }[target_lang]
         failure_reason = {
-            "ko": "위험도 판단 실패(보수적 처리)",
-            "en": "Risk assessment failed (conservative fallback)",
-            "cn": "风险评估失败（保守处理）",
+            "ko": "메뉴 정보를 충분히 읽지 못해 점수를 조금 더 조심스럽게 계산했어요.",
+            "en": "We could not read enough menu information, so the score was calculated a bit more cautiously.",
+            "cn": "由于未能充分读取菜单信息，分数采用了更谨慎的计算方式。",
         }[target_lang]
 
         # 변경 배경:
