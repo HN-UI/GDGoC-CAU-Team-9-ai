@@ -6,6 +6,7 @@ from app.utils.avoid_ingredient_synonyms import (
     build_canonical_display_map,
     canonicalize_avoid_ingredients,
     find_matching_avoid_canonical,
+    get_canonical_ancestors,
     get_display_name,
     get_menu_evidence_catalog,
     normalize_ingredient_token,
@@ -188,6 +189,49 @@ def _resolve_canonical_conflicts(
     return filtered
 
 
+def _infer_menu_ingredient_canonicals(menu_name: str, evidence_catalog: dict) -> List[str]:
+    menu_norm = normalize_ingredient_token(menu_name)
+    if not menu_norm:
+        return []
+
+    ranked_hits: List[tuple[int, int, str]] = []
+    for canonical, entry in evidence_catalog.items():
+        matched_term = _match_any(menu_name, entry.get("strong", []))
+        rank = 3
+        if not matched_term:
+            matched_term = _match_any(menu_name, entry.get("prior", []))
+            rank = 2
+        if not matched_term:
+            direct_terms = [
+                term
+                for term in entry.get("direct", [])
+                if len(normalize_ingredient_token(term)) >= 2
+            ]
+            matched_term = _match_any(menu_name, direct_terms)
+            rank = 1
+        if not matched_term:
+            continue
+
+        term_norm = normalize_ingredient_token(matched_term)
+        position = menu_norm.find(term_norm) if term_norm else -1
+        if position < 0:
+            position = 10**6
+        ranked_hits.append((rank, position, canonical))
+
+    ranked_hits.sort(key=lambda item: (-item[0], item[1], item[2]))
+
+    ordered_canonicals: List[str] = []
+    seen = set()
+    for _, _, canonical in ranked_hits:
+        for candidate in [canonical, *get_canonical_ancestors(canonical)]:
+            candidate_norm = (candidate or "").strip().casefold()
+            if not candidate_norm or candidate_norm in seen:
+                continue
+            seen.add(candidate_norm)
+            ordered_canonicals.append(candidate_norm)
+    return ordered_canonicals
+
+
 def _merge_verified_suspects(
     verified_pairs: List[tuple[str, RiskSuspect]],
 ) -> List[tuple[str, RiskSuspect]]:
@@ -250,6 +294,14 @@ def verify_risk_items(risk_items: List[RiskItem], avoid_terms: List[str], lang: 
         matched_avoid: List[str] = []
         avoid_evidence: List[AvoidEvidence] = []
         suspected_ingredients: List[str] = []
+        inferred_menu_canonicals = _infer_menu_ingredient_canonicals(item.menu, evidence_catalog)
+        for canonical in inferred_menu_canonicals:
+            display_name = display_by_requested_canonical.get(
+                canonical,
+                get_display_name(canonical, lang=lang),
+            )
+            if display_name not in suspected_ingredients:
+                suspected_ingredients.append(display_name)
         for matched_avoid_canonical, suspect in verified_pairs:
             display_name = display_by_requested_canonical.get(
                 matched_avoid_canonical,

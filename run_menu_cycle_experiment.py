@@ -24,7 +24,7 @@ def build_parser():
         default="debug/menu_cycle_result.json",
         help="실험 결과 JSON 저장 경로",
     )
-    parser.add_argument("--menu-country-code", default="KR", help="국가 코드(ISO-3166 alpha-2, 예: KR/US/JP)")
+    parser.add_argument("--menu-country-code", default="AUTO", help="메뉴판 OCR 언어 힌트. 모르면 AUTO")
     parser.add_argument("--min-confidence", type=float, default=0.5, help="OCR confidence 임계값")
     parser.add_argument(
         "--min-short-edge",
@@ -84,6 +84,7 @@ def main():
             image_bytes=raw_data,
             image_mime=mime,
             use_image_context=True,
+            ocr_lang=ocr_out.resolved_lang,
         )
         t_judge = int((time.perf_counter() - t2) * 1000)
     except Exception as exc:
@@ -98,6 +99,7 @@ def main():
     print("=== Menu Cycle Result ===")
     print(f"image            : {args.image}")
     print(f"preprocessed     : {args.preprocessed_out}")
+    print(f"ocr lang         : {ocr_out.resolved_lang or ocr.lang} ({ocr_out.lang_detection_source or ocr.lang_source})")
     print(f"ocr lines        : {len(ocr_out.lines)}")
     print(f"menu candidates  : {len(menu_texts)}")
     print(f"timings(ms)      : preprocess={t_pre}, ocr={t_ocr}, judge={t_judge}")

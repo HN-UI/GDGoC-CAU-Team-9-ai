@@ -37,7 +37,7 @@ def build_parser():
         default="debug/menu_clean_result.json",
         help="실험 결과 JSON 저장 경로",
     )
-    parser.add_argument("--menu-country-code", default="KR", help="국가 코드(ISO-3166 alpha-2, 예: KR/US/JP)")
+    parser.add_argument("--menu-country-code", default="AUTO", help="메뉴판 OCR 언어 힌트. 모르면 AUTO")
     parser.add_argument("--min-confidence", type=float, default=0.5, help="OCR confidence 임계값")
     parser.add_argument(
         "--min-short-edge",
@@ -104,6 +104,7 @@ def extract_candidates_from_image(args) -> dict:
         image_bytes=raw_data,
         image_mime=mime,
         use_image_context=True,
+        ocr_lang=ocr_out.resolved_lang,
     )
     t_ext = int((time.perf_counter() - t_ext_s) * 1000)
 
@@ -152,6 +153,12 @@ def main():
     print(f"input mode        : {'image' if args.image and not args.candidates and not args.candidates_json else 'raw_candidates'}")
     if args.image:
         print(f"image             : {args.image}")
+        ocr_result = extraction_meta.get("ocr_result") or {}
+        if isinstance(ocr_result, dict):
+            print(
+                f"ocr lang          : {ocr_result.get('resolved_lang') or '-'} "
+                f"({ocr_result.get('lang_detection_source') or '-'})"
+            )
     print(f"raw candidate cnt : {len(raw_candidates)}")
     print(f"cleaned item cnt  : {len(clean_result.cleaned_items)}")
     if extraction_meta.get("timings_ms"):

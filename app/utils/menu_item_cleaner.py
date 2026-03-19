@@ -1,6 +1,8 @@
 import re
 import unicodedata
+from collections import Counter
 from dataclasses import asdict, dataclass, field
+from difflib import SequenceMatcher
 from typing import Dict, List
 
 
@@ -10,12 +12,95 @@ LEADING_INDEX_RE = re.compile(
 )
 TRAILING_PRICE_RE_LIST = [
     re.compile(r"\s+[$€£¥₩]\s*\d+(?:[.,]\d{1,2})?$"),
-    re.compile(r"\s+\d+(?:[.,]\d{1,2})?\s*(?:원|krw|usd|eur|cny|jpy|元|円)$", re.IGNORECASE),
-    re.compile(r"\s+\d{1,3}(?:[.,]\d{1,2})$"),
-    re.compile(r"(?<=\D)\d{1,3}(?:[.,]\d{1,2})$"),
+    re.compile(
+        r"\s+(?:\d{1,3}(?:,\d{3})+|\d+)(?:[.,]\d{1,2})?\s*(?:원|krw|usd|eur|cny|jpy|元|円)$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\s+(?:\d{1,3}(?:,\d{3})+|\d+)(?:[.,]\d{1,2})$"),
+    re.compile(r"(?<=\D)(?:\d{1,3}(?:,\d{3})+|\d+)(?:[.,]\d{1,2})$"),
 ]
 EDGE_PUNCT_RE = re.compile(r"^[\s\-–—:;,.|/\\•·*]+|[\s\-–—:;,.|/\\•·*]+$")
 NON_TEXT_RE = re.compile(r"[\s\-_–—:;,.|/\\•·*()\[\]{}<>]+")
+VOLUME_SUFFIX_RE = re.compile(r"(?<=\d)m\b", re.IGNORECASE)
+VOLUME_LIKE_RE = re.compile(r"(?:\d+(?:\.\d+)?)\s*(?:ml|l|oz|g|kg|mg|인분|잔|병|캔|pc|pcs)\b", re.IGNORECASE)
+REPEATED_BRAND_RE = re.compile(r"^([a-z가-힣])\1+$", re.IGNORECASE)
+
+
+def _normalize_rule_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text or "")
+    normalized = "".join(ch for ch in normalized if not ch.isspace())
+    normalized = NON_TEXT_RE.sub("", normalized)
+    return normalized.casefold()
+
+
+def _normalized_terms(values: set[str]) -> tuple[str, ...]:
+    terms = {_normalize_rule_text(value) for value in values}
+    return tuple(sorted((term for term in terms if term), key=len, reverse=True))
+
+
+SECTION_HEADER_HINTS = {
+    _normalize_rule_text(value)
+    for value in {
+        "사이드",
+        "메인",
+        "음료",
+        "주류",
+        "주류/음료",
+        "세트",
+        "코스",
+        "추가",
+        "토핑",
+        "사리",
+        "단품",
+        "요리",
+        "식사",
+        "메뉴",
+    }
+}
+MARKETING_HINTS = _normalized_terms(
+    {
+        "프리미엄",
+        "시그니처",
+        "스페셜",
+        "베스트",
+        "best",
+        "추천",
+        "인기",
+        "대표",
+        "고퀄리티",
+        "건강",
+    }
+)
+SENTENCE_ENDING_HINTS = _normalized_terms(
+    {
+        "입니다",
+        "습니다",
+        "합니다",
+        "됩니다",
+        "있습니다",
+        "가능합니다",
+        "드립니다",
+    }
+)
+PARTICIPLE_HINTS = _normalized_terms(
+    {
+        "들어있",
+        "담긴",
+        "어우러진",
+        "느껴지",
+        "숙성",
+        "자작하게",
+        "곁들인",
+        "제공",
+        "풍미",
+        "식감",
+        "특징",
+        "위한",
+        "맛을 낸",
+        "맛을낸",
+    }
+)
+PARTICLE_TOKEN_ENDINGS = ("으로", "에서", "에게", "에는", "와", "과", "의")
 
 
 @dataclass
@@ -78,6 +163,7 @@ def clean_menu_candidates(candidates: List[str]) -> MenuCleanResult:
 
     deduped = _dedupe_candidates(staged)
     resolved = _resolve_overlaps(deduped)
+    resolved = _drop_contextual_generics(resolved)
 
     kept = [item for item in resolved if item.status == "kept"]
     kept.sort(key=lambda item: (-item.score, item.cleaned_text))
@@ -118,6 +204,11 @@ def _clean_text(text: str) -> tuple[str, List[str]]:
         reasons.append("trimmed_edge_punctuation")
         current = updated
 
+    updated, normalize_reasons = _normalize_common_menu_text(current)
+    if updated != current:
+        reasons.extend(normalize_reasons)
+        current = updated
+
     for regex in TRAILING_PRICE_RE_LIST:
         updated = regex.sub("", current).strip()
         if updated != current:
@@ -140,11 +231,12 @@ def _clean_text(text: str) -> tuple[str, List[str]]:
 
 def _drop_reason(candidate: MenuCleanCandidate) -> str:
     text = candidate.cleaned_text
+    compact = candidate.compact_text
     metrics = candidate.metrics
 
     if not text:
         return "empty_after_clean"
-    if candidate.compact_text and len(candidate.compact_text) < 2:
+    if compact and len(compact) < 2:
         return "too_short"
     if metrics["letter_count"] <= 0:
         return "no_letter_like_chars"
@@ -152,6 +244,10 @@ def _drop_reason(candidate: MenuCleanCandidate) -> str:
         return "too_little_information"
     if metrics["letter_ratio"] < 0.45:
         return "low_letter_ratio"
+    if compact in SECTION_HEADER_HINTS:
+        return "generic_category_header"
+    if _looks_like_description_text(text, compact, metrics):
+        return "looks_like_description"
     return ""
 
 
@@ -226,38 +322,158 @@ def _resolve_overlaps(candidates: List[MenuCleanCandidate]) -> List[MenuCleanCan
     return final_kept + final_dropped
 
 
+def _drop_contextual_generics(candidates: List[MenuCleanCandidate]) -> List[MenuCleanCandidate]:
+    kept = [item for item in candidates if item.status == "kept"]
+    common_suffixes = _discover_common_suffix_headers(kept)
+    if not common_suffixes:
+        return candidates
+
+    for item in kept:
+        if item.status != "kept":
+            continue
+
+        matched_suffix = _matched_common_suffix(item.compact_text, common_suffixes)
+        if not matched_suffix:
+            continue
+
+        if item.compact_text == matched_suffix:
+            item.status = "dropped"
+            item.reasons.append("common_suffix_header")
+            continue
+
+        prefix = item.compact_text[: -len(matched_suffix)]
+        if _looks_like_repeated_brand(prefix):
+            item.status = "dropped"
+            item.reasons.append("contextual_brand_title")
+            continue
+
+        if _contains_any(item.compact_text, MARKETING_HINTS) and item.metrics["token_count"] <= 2:
+            item.status = "dropped"
+            item.reasons.append("contextual_marketing_title")
+
+    return candidates
+
+
+def _discover_common_suffix_headers(candidates: List[MenuCleanCandidate]) -> Dict[str, int]:
+    discovered: Dict[str, int] = {}
+
+    for item in candidates:
+        compact = item.compact_text
+        if not _is_suffix_header_candidate(item):
+            continue
+
+        count = 0
+        for other in candidates:
+            if other is item or len(other.compact_text) <= len(compact) + 1:
+                continue
+            if _text_ends_with_suffix_variant(other.compact_text, compact):
+                count += 1
+
+        if count >= 3:
+            discovered[compact] = count
+
+    return discovered
+
+
+def _is_suffix_header_candidate(candidate: MenuCleanCandidate) -> bool:
+    compact = candidate.compact_text
+    metrics = candidate.metrics
+    if not compact or len(compact) < 2 or len(compact) > 4:
+        return False
+    if metrics["token_count"] > 1 or metrics["digit_count"] > 0:
+        return False
+    return True
+
+
+def _matched_common_suffix(compact_text: str, common_suffixes: Dict[str, int]) -> str:
+    for suffix in sorted(common_suffixes.keys(), key=len, reverse=True):
+        if len(compact_text) < len(suffix):
+            continue
+        tail = compact_text[-len(suffix):]
+        if _suffix_similarity(tail, suffix) >= _suffix_match_threshold(suffix):
+            return suffix
+    return ""
+
+
+def _text_ends_with_suffix_variant(compact_text: str, suffix: str) -> bool:
+    if len(compact_text) < len(suffix):
+        return False
+    return _suffix_similarity(compact_text[-len(suffix):], suffix) >= _suffix_match_threshold(suffix)
+
+
+def _suffix_similarity(left: str, right: str) -> float:
+    if left == right:
+        return 1.0
+    if len(left) != len(right):
+        return 0.0
+    return SequenceMatcher(None, left, right).ratio()
+
+
+def _suffix_match_threshold(suffix: str) -> float:
+    return 0.5 if len(suffix) <= 2 else 0.66
+
+
 def _overlap_relation(left: str, right: str) -> str:
     if left == right:
         return "equal"
-    shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
-    if not shorter or len(shorter) < 3:
-        return ""
-    if shorter in longer and (len(shorter) / len(longer)) >= 0.65:
+
+    left_comp = _comparison_text(left)
+    right_comp = _comparison_text(right)
+    shorter, longer = (left_comp, right_comp) if len(left_comp) <= len(right_comp) else (right_comp, left_comp)
+
+    if shorter and len(shorter) >= 3 and shorter in longer and (len(shorter) / len(longer)) >= 0.65:
         return "contained"
+
+    if min(len(left_comp), len(right_comp)) >= 3 and SequenceMatcher(None, left_comp, right_comp).ratio() >= 0.82:
+        return "near_duplicate"
+
     return ""
+
+
+def _comparison_text(compact_text: str) -> str:
+    reduced = compact_text
+    for term in MARKETING_HINTS:
+        reduced = reduced.replace(term, "")
+    return reduced or compact_text
 
 
 def _choose_better(
     left: MenuCleanCandidate,
     right: MenuCleanCandidate,
 ) -> tuple[MenuCleanCandidate, MenuCleanCandidate]:
-    left_key = (round(left.score, 3), -left.metrics["token_count"], -left.metrics["digit_count"], -len(left.cleaned_text))
-    right_key = (round(right.score, 3), -right.metrics["token_count"], -right.metrics["digit_count"], -len(right.cleaned_text))
+    left_key = (round(left.score, 3), -left.metrics["token_count"], -len(left.cleaned_text), -left.metrics["digit_count"])
+    right_key = (round(right.score, 3), -right.metrics["token_count"], -len(right.cleaned_text), -right.metrics["digit_count"])
     if left_key >= right_key:
         return left, right
     return right, left
 
 
 def _quality_score(text: str, metrics: Dict[str, float]) -> float:
+    compact = _compact_text(text)
     letter_count = metrics["letter_count"]
     token_count = metrics["token_count"]
     digit_count = metrics["digit_count"]
     symbol_count = metrics["symbol_count"]
-    length_penalty = max(0.0, len(text) - 18) * 0.12
-    token_penalty = max(0.0, token_count - 3) * 1.4
-    digit_penalty = digit_count * 0.9
+    volume_like = bool(VOLUME_LIKE_RE.search(text))
+
+    description_penalty = 6.0 if _looks_like_description_text(text, compact, metrics) else 0.0
+    marketing_penalty = 2.0 * _count_terms(compact, MARKETING_HINTS)
+    length_penalty = max(0.0, len(text) - 14) * 0.22
+    token_penalty = max(0.0, token_count - 2) * 2.0
+    digit_penalty = digit_count * (0.35 if volume_like else 0.9)
     symbol_penalty = symbol_count * 0.5
-    return float(letter_count - token_penalty - digit_penalty - symbol_penalty - length_penalty)
+    volume_bonus = 1.5 if volume_like else 0.0
+
+    return float(
+        letter_count
+        + volume_bonus
+        - token_penalty
+        - digit_penalty
+        - symbol_penalty
+        - length_penalty
+        - description_penalty
+        - marketing_penalty
+    )
 
 
 def _shape_metrics(text: str) -> Dict[str, float]:
@@ -282,3 +498,52 @@ def _compact_text(text: str) -> str:
     stripped = "".join(ch for ch in unicodedata.normalize("NFKC", text or "") if not ch.isspace())
     stripped = NON_TEXT_RE.sub("", stripped)
     return stripped.casefold()
+
+
+def _normalize_common_menu_text(text: str) -> tuple[str, List[str]]:
+    current = text
+    reasons: List[str] = []
+
+    updated = VOLUME_SUFFIX_RE.sub("ml", current)
+    if updated != current:
+        current = updated
+        reasons.append("normalized_volume_suffix")
+
+    return current, reasons
+
+
+def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
+    return any(term and term in text for term in terms)
+
+
+def _count_terms(text: str, terms: tuple[str, ...]) -> int:
+    return sum(1 for term in terms if term and term in text)
+
+
+def _particle_like_token_count(text: str) -> int:
+    count = 0
+    for raw_token in text.split():
+        token = raw_token.strip(",./|")
+        if len(token) < 2:
+            continue
+        for ending in PARTICLE_TOKEN_ENDINGS:
+            if token.endswith(ending):
+                count += 1
+                break
+    return count
+
+
+def _looks_like_description_text(text: str, compact_text: str, metrics: Dict[str, float]) -> bool:
+    if ", " in text and len(text.split()) >= 4:
+        return True
+    if _contains_any(compact_text, SENTENCE_ENDING_HINTS):
+        return True
+    if _contains_any(compact_text, PARTICIPLE_HINTS) and (metrics["token_count"] >= 2 or len(compact_text) >= 10):
+        return True
+    if _particle_like_token_count(text) >= 2 and metrics["token_count"] >= 3:
+        return True
+    return False
+
+
+def _looks_like_repeated_brand(text: str) -> bool:
+    return bool(text and REPEATED_BRAND_RE.fullmatch(text))

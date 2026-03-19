@@ -19,7 +19,7 @@ class ScorePolicyAgent:
         "direct": 100,
         "alias": 90,
         "menu_prior": 50,
-        "weak_inference": 12,
+        "weak_inference": 28,
         "none": 0,
     }
     REASON_LABELS = {
@@ -39,6 +39,12 @@ class ScorePolicyAgent:
     NO_EVIDENCE_UNCERTAINTY_SCALE = 36
     NO_EVIDENCE_SPECIFIC_CONF_FLOOR_WEAK = 0.25
     NO_EVIDENCE_SPECIFIC_CONF_FLOOR_STRONG = 0.35
+    NO_EVIDENCE_MIN_RISK_STRONG = 10
+    NO_EVIDENCE_MIN_RISK_DEFAULT = 12
+    NO_EVIDENCE_MIN_RISK_NO_SPECIFIC = 16
+    NO_EVIDENCE_MIN_RISK_LOW_CONF = 18
+    NO_EVIDENCE_MIN_RISK_VERY_LOW_CONF = 22
+    NO_EVIDENCE_MIN_RISK_GENERIC_ONLY = 26
 
     GENERIC_ONLY_BASE_RISK = 30
     GENERIC_EXTRA_TOKEN_RISK = 5
@@ -136,22 +142,26 @@ class ScorePolicyAgent:
     )
 
     def run(self, request: ScorePolicyInput) -> ScorePolicyOutput:
-        scored = []
+        scored_pairs = []
 
         for it in request.risk_items:
             menu_profile = self._build_menu_profile(it)
             generic_penalty = self._compute_generic_penalty(it, menu_profile)
             specificity_bonus = self._compute_specificity_bonus(it, menu_profile)
+            display_confidence = self._relevant_confidence(it)
 
             # 1) 구조화 근거 기반 위험도(규칙)
             structured_risk = self._structured_risk(it)
             if not it.avoid_evidence:
-                final_risk = self._no_evidence_risk(
+                base_no_evidence_risk = self._no_evidence_risk(
                     it.confidence,
                     menu_profile,
                     request.uncertainty_penalty,
                 )
-                final_risk = final_risk + generic_penalty - specificity_bonus
+                adjusted_risk = base_no_evidence_risk + generic_penalty
+                min_risk = self._minimum_no_evidence_risk(it.confidence, menu_profile)
+                reducible_bonus = max(0, adjusted_risk - min_risk)
+                final_risk = adjusted_risk - min(specificity_bonus, reducible_bonus)
             else:
                 final_risk = structured_risk
                 final_risk = final_risk + generic_penalty
@@ -159,22 +169,26 @@ class ScorePolicyAgent:
             final_risk = max(0, min(100, final_risk))
             final_score = int(max(0, min(100, 100 - final_risk)))
 
-            scored.append(
-                ScoredItem(
-                    menu=it.menu,
-                    menu_original=it.menu,
-                    score=final_score,
-                    risk=final_risk,
-                    confidence=it.confidence,
-                    matched_avoid=it.matched_avoid,
-                    suspected_ingredients=it.suspected_ingredients,
-                    # reason은 영어 canonical 문장으로 먼저 생성하고,
-                    # 최종 언어(localization)는 오케스트레이터에서 처리한다.
-                    reason=self._build_reason_en(it),
+            scored_pairs.append(
+                (
+                    ScoredItem(
+                        menu=it.menu,
+                        menu_original=it.menu,
+                        score=final_score,
+                        risk=final_risk,
+                        confidence=display_confidence,
+                        matched_avoid=it.matched_avoid,
+                        suspected_ingredients=it.suspected_ingredients,
+                        # reason은 영어 canonical 문장으로 먼저 생성하고,
+                        # 최종 언어(localization)는 오케스트레이터에서 처리한다.
+                        reason=self._build_reason_en(it),
+                    ),
+                    it,
                 )
             )
 
-        scored.sort(key=lambda x: (x.score, x.confidence), reverse=True)
+        scored_pairs.sort(key=lambda pair: self._sort_key(pair[0], pair[1]))
+        scored = [item for item, _ in scored_pairs]
         best = scored[0] if scored else None
         return ScorePolicyOutput(items=scored, best=best)
 
@@ -200,7 +214,7 @@ class ScorePolicyAgent:
             max(0, unique_count - 1) * ScorePolicyAgent.EXTRA_RISK_PER_INGREDIENT,
         )
 
-        bounded_conf = ScorePolicyAgent._clamp_confidence(item.confidence)
+        bounded_conf = ScorePolicyAgent._relevant_confidence(item)
         low_conf_penalty = int(round((1.0 - bounded_conf) * ScorePolicyAgent.LOW_CONF_RISK_SCALE))
 
         return int(min(100, base_risk + additional_ingredient_risk + low_conf_penalty))
@@ -224,7 +238,7 @@ class ScorePolicyAgent:
         else:
             reason = f"Caution: {top.ingredient} + {unique_count - 1} more ingredients"
 
-        if item.confidence < ScorePolicyAgent.LOW_CONF_REASON_THRESHOLD:
+        if ScorePolicyAgent._relevant_confidence(item) < ScorePolicyAgent.LOW_CONF_REASON_THRESHOLD:
             return f"{reason} (low confidence)"
         return reason
 
@@ -246,6 +260,23 @@ class ScorePolicyAgent:
             )
         )
 
+    @classmethod
+    def _minimum_no_evidence_risk(cls, confidence: float, menu_profile: dict) -> int:
+        bounded_conf = cls._clamp_confidence(confidence)
+        if menu_profile.get("is_generic_only"):
+            return cls.NO_EVIDENCE_MIN_RISK_GENERIC_ONLY
+        if bounded_conf < 0.15:
+            return cls.NO_EVIDENCE_MIN_RISK_VERY_LOW_CONF
+        if bounded_conf < 0.35:
+            return cls.NO_EVIDENCE_MIN_RISK_LOW_CONF
+
+        specific_signal_count = int(menu_profile.get("specific_signal_count", 0))
+        if specific_signal_count >= 2 and bounded_conf >= 0.6:
+            return cls.NO_EVIDENCE_MIN_RISK_STRONG
+        if specific_signal_count == 0:
+            return cls.NO_EVIDENCE_MIN_RISK_NO_SPECIFIC
+        return cls.NO_EVIDENCE_MIN_RISK_DEFAULT
+
     @staticmethod
     def _strongest_evidence(item):
         if not item.avoid_evidence:
@@ -255,9 +286,38 @@ class ScorePolicyAgent:
             key=lambda ev: ScorePolicyAgent.EVIDENCE_RANK.get(ev.evidence_type, 1),
         )
 
+    @classmethod
+    def _relevant_confidence(cls, item) -> float:
+        strongest = cls._strongest_evidence(item)
+        if strongest is not None:
+            return cls._clamp_confidence(strongest.confidence)
+        return cls._clamp_confidence(item.confidence)
+
+    @classmethod
+    def _strongest_evidence_rank(cls, item) -> int:
+        strongest = cls._strongest_evidence(item)
+        if strongest is None:
+            return 0
+        return cls.EVIDENCE_RANK.get(strongest.evidence_type, 0)
+
     @staticmethod
     def _clamp_confidence(confidence: float) -> float:
         return max(0.0, min(1.0, float(confidence)))
+
+    @classmethod
+    def _sort_key(cls, scored_item, risk_item):
+        has_avoid_evidence = 1 if risk_item.avoid_evidence else 0
+        strongest_rank = cls._strongest_evidence_rank(risk_item)
+        relevant_confidence = cls._relevant_confidence(risk_item)
+        confidence_order = relevant_confidence if has_avoid_evidence else -relevant_confidence
+        menu_key = normalize_ingredient_token(scored_item.menu_original or scored_item.menu)
+        return (
+            -scored_item.score,
+            has_avoid_evidence,
+            strongest_rank,
+            confidence_order,
+            menu_key,
+        )
 
     @staticmethod
     def _contains_term(menu_name: str, term: str) -> bool:

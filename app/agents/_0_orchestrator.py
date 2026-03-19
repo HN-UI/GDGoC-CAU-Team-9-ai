@@ -21,6 +21,7 @@ from app.agents._0_translate_agent import TranslateAgent
 from app.clients.gemma_client import GemmaClient
 from app.utils.image_io import load_image
 from app.utils.menu_evidence_verifier import verify_risk_items
+from app.utils.menu_item_cleaner import clean_menu_candidates
 
 
 class MenuAgentOrchestrator:
@@ -45,11 +46,10 @@ class MenuAgentOrchestrator:
         image_url: str,
         avoid: List[str],
         user_lang: str = "ko",
-        menu_country_code: str = "KR",
+        menu_country_code: str = "AUTO",
     ) -> FinalResponse:
-        # 허용 언어 외 값은 기본 한국어로 처리
-        lang = user_lang if user_lang in {"ko", "en", "cn"} else "ko"
-        _ = (menu_country_code or "KR").strip().upper()
+        requested_user_lang = (user_lang or "ko").strip().lower()
+        lang = requested_user_lang if requested_user_lang in {"ko", "en", "cn"} else "ko"
         t_total = time.perf_counter()
         timings_ms = {}
 
@@ -70,17 +70,23 @@ class MenuAgentOrchestrator:
         t_extract = time.perf_counter()
         ocr = OCRAgent(menu_country_code=menu_country_code)
         ocr_out = ocr.run(data)
+        resolved_menu_country_code = self._resolve_menu_country_code(ocr_out.resolved_lang)
         judged = self.extract_agent.run_lines_with_image(
             lines=ocr_out.lines,
             image_bytes=raw_data,
             image_mime=raw_mime,
             use_image_context=True,
+            ocr_lang=ocr_out.resolved_lang,
         )
         extracted = judged.to_extract_output() if hasattr(judged, "to_extract_output") else None
         if extracted is None:
             from app.agents._0_contracts import ExtractOutput
 
             extracted = ExtractOutput(items=judged.menu_texts)
+        else:
+            extracted.items = list(extracted.items)
+        clean_result = clean_menu_candidates(extracted.items)
+        extracted.items = clean_result.cleaned_items
         timings_ms["extract"] = self._elapsed_ms(t_extract)
 
         # 메뉴가 비어 있으면 후속 단계를 건너뛰고 바로 반환
@@ -89,7 +95,16 @@ class MenuAgentOrchestrator:
             timings_ms["risk_verify"] = 0
             timings_ms["score_policy"] = 0
             timings_ms["total"] = self._elapsed_ms(t_total)
-            return FinalResponse(items_extracted=[], items=[], best=None, timings_ms=timings_ms)
+            return FinalResponse(
+                items_extracted=[],
+                items=[],
+                best=None,
+                timings_ms=timings_ms,
+                output_lang=lang,
+                menu_country_code=resolved_menu_country_code,
+                menu_ocr_lang=ocr_out.resolved_lang,
+                menu_ocr_lang_source=ocr_out.lang_detection_source,
+            )
 
         # 2) RiskAssess Agent
         t_risk = time.perf_counter()
@@ -143,6 +158,10 @@ class MenuAgentOrchestrator:
             items=scored_items,
             best=best,
             timings_ms=timings_ms,
+            output_lang=lang,
+            menu_country_code=resolved_menu_country_code,
+            menu_ocr_lang=ocr_out.resolved_lang,
+            menu_ocr_lang_source=ocr_out.lang_detection_source,
         )
 
     def _fallback_score(self, items: List[str], lang: str = "ko"):
@@ -179,6 +198,18 @@ class MenuAgentOrchestrator:
     def _elapsed_ms(start_time: float) -> int:
         # perf_counter 기반 경과시간(ms) 계산
         return int(max(0, round((time.perf_counter() - start_time) * 1000)))
+
+    @staticmethod
+    def _resolve_menu_country_code(detected_ocr_lang: str) -> str:
+        mapping = {
+            "korean": "KR",
+            "japan": "JP",
+            "ch": "CN",
+            "chinese_cht": "TW",
+            "en": "US",
+            "es": "ES",
+        }
+        return mapping.get((detected_ocr_lang or "").strip().lower(), "")
 
     def _localize_item_menus(self, items: List[ScoredItem], lang: str) -> None:
         target_lang = lang if lang in {"ko", "en", "cn"} else "en"

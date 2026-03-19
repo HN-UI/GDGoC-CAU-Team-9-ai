@@ -1,4 +1,5 @@
 import os
+import threading
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -6,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from app.agents._0_contracts import FinalResponse, TranslateOutput
 from app.agents._0_orchestrator import ImageLoadError, MenuAgentOrchestrator
+from app.agents._eval_2_ocr import OCRAgent
 from app.clients.gemma_client import GemmaClient
 
 
@@ -19,11 +21,56 @@ gemma = GemmaClient(
 orchestrator = MenuAgentOrchestrator(gemma, uncertainty_penalty=40)
 
 
+def _parse_preload_langs(raw_value: str) -> List[str]:
+    if not raw_value:
+        return list(OCRAgent.DEFAULT_AUTO_LANGS)
+    out: List[str] = []
+    for token in raw_value.split(","):
+        value = token.strip().lower()
+        if value:
+            out.append(value)
+    return out or list(OCRAgent.DEFAULT_AUTO_LANGS)
+
+
+def _should_enable(value: str, default: bool = True) -> bool:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
+
+
+@app.on_event("startup")
+def preload_ocr_engines():
+    if not _should_enable(os.getenv("OCR_PRELOAD_ON_STARTUP", "1"), default=True):
+        return
+
+    preload_mode = (os.getenv("OCR_PRELOAD_MODE", "probe") or "probe").strip().lower()
+    preload_probe = preload_mode in {"probe", "all"}
+    preload_full = preload_mode in {"full", "all"}
+    preload_langs = _parse_preload_langs(os.getenv("OCR_PRELOAD_LANGS", ""))
+
+    def _worker():
+        try:
+            OCRAgent.warmup_shared_engines(
+                langs=preload_langs,
+                preload_probe=preload_probe,
+                preload_full=preload_full,
+            )
+        except Exception:
+            # warm-up failure should not block API startup
+            return
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 class RankRequest(BaseModel):
     image_url: str = Field(..., description="메뉴판 이미지 URL")
     avoid: List[str] = Field(default_factory=list, description="기피 재료 리스트")
     user_lang: str = Field("ko", description="사용자/응답 언어(ko/en/cn)")
-    menu_country_code: str = Field("KR", description="메뉴판 언어 국가 코드(ISO-3166 alpha-2)")
+    menu_country_code: str = Field(
+        "AUTO",
+        description="메뉴판 OCR 언어 힌트. 모르면 AUTO",
+    )
     # 하위 호환: 기존 필드가 오면 user_lang/menu_country_code로 대체 사용
     lang: Optional[str] = Field(None, description="(deprecated) user_lang 사용 권장")
     country_code: Optional[str] = Field(None, description="(deprecated) menu_country_code 사용 권장")
@@ -54,7 +101,7 @@ def health():
 def rank(req: RankRequest):
     try:
         user_lang = (req.user_lang or req.lang or "ko")
-        menu_country_code = (req.menu_country_code or req.country_code or "KR")
+        menu_country_code = (req.menu_country_code or req.country_code or "AUTO")
         result = orchestrator.run(
             req.image_url,
             req.avoid,

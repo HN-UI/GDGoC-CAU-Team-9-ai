@@ -24,8 +24,8 @@ def build_parser():
     )
     parser.add_argument(
         "--menu-country-code",
-        default="KR",
-        help="메뉴판 언어 국가 코드(예: KR, US, JP)",
+        default="AUTO",
+        help="메뉴판 OCR 언어 힌트. 모르면 AUTO",
     )
     parser.add_argument(
         "--avoid",
@@ -62,7 +62,9 @@ def print_summary(result, args, resolved_image_source: str):
     print("=" * 72)
     print(f"Image Source      : {resolved_image_source}")
     print(f"User Language     : {args.user_lang}")
-    print(f"Menu Country Code : {args.menu_country_code}")
+    print(f"Output Language   : {result.output_lang or '-'}")
+    print(f"Menu Country Code : {result.menu_country_code or '-'}")
+    print(f"Menu OCR Lang     : {result.menu_ocr_lang or '-'} ({result.menu_ocr_lang_source or '-'})")
     print(f"Avoid Ingredients : {', '.join(args.avoid) if args.avoid else '-'}")
     print()
 

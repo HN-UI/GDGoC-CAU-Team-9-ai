@@ -41,7 +41,7 @@ def build_parser():
         choices=["ko", "en", "cn"],
         help="출력 표시 언어",
     )
-    parser.add_argument("--menu-country-code", default="KR", help="국가 코드(ISO-3166 alpha-2)")
+    parser.add_argument("--menu-country-code", default="AUTO", help="메뉴판 OCR 언어 힌트. 모르면 AUTO")
     parser.add_argument("--min-confidence", type=float, default=0.5, help="OCR confidence 임계값")
     parser.add_argument(
         "--min-short-edge",
@@ -113,6 +113,7 @@ def extract_items_from_image(args) -> dict:
         image_bytes=raw_data,
         image_mime=mime,
         use_image_context=True,
+        ocr_lang=ocr_out.resolved_lang,
     )
     t_ext = int((time.perf_counter() - t_ext_s) * 1000)
 

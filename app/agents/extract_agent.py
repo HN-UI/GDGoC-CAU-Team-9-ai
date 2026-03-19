@@ -6,6 +6,7 @@ from app.agents._0_contracts import ExtractOutput
 from app.agents._eval_2_ocr import OCRAgent
 from app.agents._eval_3_extractor import OCRMenuJudgeAgent
 from app.clients.gemma_client import GemmaClient
+from app.utils.menu_item_cleaner import clean_menu_candidates
 
 
 class MenuExtractAgent:
@@ -15,7 +16,7 @@ class MenuExtractAgent:
     현재 OCR + 메뉴 판독 조합으로 메뉴 후보를 추출한다.
     """
 
-    def __init__(self, gemma: GemmaClient, menu_country_code: str = "KR"):
+    def __init__(self, gemma: GemmaClient, menu_country_code: str = "AUTO"):
         self.ocr = OCRAgent(menu_country_code=menu_country_code)
         self.judge = OCRMenuJudgeAgent(gemma)
 
@@ -30,8 +31,10 @@ class MenuExtractAgent:
             image_bytes=image_bytes,
             image_mime=image_mime or "image/jpeg",
             use_image_context=True,
+            ocr_lang=ocr_out.resolved_lang,
         )
-        return ExtractOutput(items=judged.menu_texts)
+        clean_result = clean_menu_candidates(judged.menu_texts)
+        return ExtractOutput(items=clean_result.cleaned_items)
 
     @staticmethod
     def _read_part_bytes(image_part: types.Part) -> tuple[bytes, Optional[str]]:

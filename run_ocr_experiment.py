@@ -9,6 +9,7 @@ from app.agents._eval_2_ocr import OCRAgent
 from app.agents._eval_3_extractor import OCRMenuJudgeAgent
 from app.clients.gemma_client import GemmaClient
 from app.utils.image_io import load_image
+from app.utils.menu_item_cleaner import clean_menu_candidates
 
 
 def build_parser():
@@ -24,7 +25,7 @@ def build_parser():
         default="debug/ocr_experiment_result.json",
         help="실험 결과 JSON 저장 경로",
     )
-    parser.add_argument("--menu-country-code", default="KR", help="메뉴판 언어 국가 코드(ISO-3166 alpha-2)")
+    parser.add_argument("--menu-country-code", default="AUTO", help="메뉴판 OCR 언어 힌트. 모르면 AUTO")
     parser.add_argument("--min-confidence", type=float, default=0.5, help="OCR confidence 임계값")
     parser.add_argument(
         "--top",
@@ -84,11 +85,16 @@ def main():
             image_bytes=raw_data,
             image_mime=mime,
             use_image_context=(not args.no_image_context),
+            ocr_lang=ocr_out.resolved_lang,
         )
     except Exception as exc:
         print("[ERROR] Extractor 실행 실패:", str(exc))
         return 1
     t_ext = int((time.perf_counter() - t_ext_s) * 1000)
+
+    t_clean_s = time.perf_counter()
+    clean_result = clean_menu_candidates(judged.menu_texts)
+    t_clean = int((time.perf_counter() - t_clean_s) * 1000)
     t_total = int((time.perf_counter() - t0) * 1000)
 
     label_groups = {}
@@ -100,12 +106,23 @@ def main():
     print(f"image              : {args.image}")
     print(f"preprocessed       : {args.preprocessed_out}")
     print(f"menu_country_code  : {args.menu_country_code}")
-    print(f"resolved_ocr_lang  : {ocr.lang}")
+    print(f"resolved_ocr_lang  : {ocr_out.resolved_lang or ocr.lang}")
+    print(f"ocr_lang_source    : {ocr_out.lang_detection_source or ocr.lang_source}")
     print(f"image_context      : {not args.no_image_context}")
     print(f"ocr_lines          : {len(ocr_out.lines)}")
-    print(f"menu_texts         : {len(judged.menu_texts)}")
-    print(f"timings(ms)        : preprocess={t_pre}, ocr={t_ocr}, extractor={t_ext}, total={t_total}")
+    print(f"menu_texts         : raw={len(judged.menu_texts)}, cleaned={len(clean_result.cleaned_items)}")
+    print(f"timings(ms)        : preprocess={t_pre}, ocr={t_ocr}, extractor={t_ext}, clean={t_clean}, total={t_total}")
     print("")
+
+    if ocr_out.lang_detection_candidates:
+        print("--- LANG CANDIDATES ---")
+        for idx, cand in enumerate(ocr_out.lang_detection_candidates, start=1):
+            print(
+                f"[LANG {idx:02d}] lang={cand.lang} score={cand.score:.3f} "
+                f"lines={cand.line_count} conf={cand.avg_confidence:.3f} "
+                f"script={cand.script_ratio:.3f}"
+            )
+        print("")
 
     print("--- OCR LINES ---")
     for idx, line in enumerate(ocr_out.lines[:top_n], start=1):
@@ -119,6 +136,24 @@ def main():
         print(f"[MENU {idx:03d}] {text}")
     if len(judged.menu_texts) > top_n:
         print(f"... ({len(judged.menu_texts) - top_n} more)")
+
+    print("")
+    print("--- CLEANED MENU TEXTS ---")
+    for idx, text in enumerate(clean_result.cleaned_items[:top_n], start=1):
+        print(f"[KEEP {idx:03d}] {text}")
+    if len(clean_result.cleaned_items) > top_n:
+        print(f"... ({len(clean_result.cleaned_items) - top_n} more)")
+
+    print("")
+    print("--- DROPPED MENU TEXTS ---")
+    if not clean_result.dropped:
+        print("- none")
+    else:
+        for idx, item in enumerate(clean_result.dropped[:top_n], start=1):
+            reasons = ",".join(item.reasons) if item.reasons else "-"
+            print(f"[DROP {idx:03d}] raw={item.raw_text} | cleaned={item.cleaned_text} | reasons={reasons}")
+        if len(clean_result.dropped) > top_n:
+            print(f"... ({len(clean_result.dropped) - top_n} more)")
 
     if label_groups:
         print("")
@@ -136,16 +171,18 @@ def main():
         "input_image": args.image,
         "preprocessed_image": args.preprocessed_out,
         "menu_country_code": args.menu_country_code,
-        "ocr_lang_resolved": ocr.lang,
+        "ocr_lang_resolved": ocr_out.resolved_lang or ocr.lang,
         "timings_ms": {
             "preprocess": t_pre,
             "ocr": t_ocr,
             "extractor": t_ext,
+            "clean": t_clean,
             "total": t_total,
         },
         "ocr_options": ocr_opts.model_dump() if hasattr(ocr_opts, "model_dump") else ocr_opts.dict(),
         "ocr_result": ocr_out.model_dump() if hasattr(ocr_out, "model_dump") else ocr_out.dict(),
         "extractor_result": judged.model_dump() if hasattr(judged, "model_dump") else judged.dict(),
+        "clean_result": clean_result.to_dict(),
     }
     with open(args.json_out, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)

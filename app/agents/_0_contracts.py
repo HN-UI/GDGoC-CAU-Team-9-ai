@@ -26,11 +26,26 @@ class OCRLine(BaseModel):
 
 class OCROptions(BaseModel):
     min_confidence: float = Field(0.5, ge=0.0, le=1.0, description="최소 신뢰도 필터")
+    include_bbox: bool = Field(False, description="OCR 결과에 bbox를 포함할지 여부")
+
+
+class OCRLanguageCandidate(BaseModel):
+    lang: str = Field("", description="OCR 후보 언어 코드")
+    score: float = Field(0.0, description="자동 언어 감지 점수")
+    line_count: int = Field(0, ge=0, description="후보 OCR에서 살아남은 라인 수")
+    avg_confidence: float = Field(0.0, ge=0.0, le=1.0, description="후보 OCR 평균 confidence")
+    script_ratio: float = Field(0.0, ge=0.0, le=1.0, description="해당 언어 스크립트 적합도")
 
 
 class OCROutput(BaseModel):
     lines: List[OCRLine] = Field(default_factory=list, description="OCR 라인 결과")
     texts: List[str] = Field(default_factory=list, description="OCR 라인 텍스트만 추출한 결과")
+    resolved_lang: str = Field("", description="실제 OCR에 사용된 언어 코드")
+    lang_detection_source: str = Field("", description="언어 결정 방식(auto/manual)")
+    lang_detection_candidates: List[OCRLanguageCandidate] = Field(
+        default_factory=list,
+        description="자동 감지 시 후보 언어 점수 목록",
+    )
 
 
 class OCRTextLabel(BaseModel):
@@ -85,7 +100,7 @@ class RiskItem(BaseModel):
     confidence: float = Field(0.0, ge=0.0, le=1.0, description="메뉴 단위 평가 신뢰도")
     suspected_ingredients: List[str] = Field(
         default_factory=list,
-        description="하위 호환용 디버그 필드. suspect canonical 표시명을 담을 수 있음",
+        description="메뉴명/기피 추정에서 읽힌 재료 cue의 표시명 목록",
     )
     suspects: List[RiskSuspect] = Field(
         default_factory=list,
@@ -137,6 +152,10 @@ class FinalResponse(BaseModel):
     items: List[ScoredItem] = Field(default_factory=list)
     best: Optional[ScoredItem] = None
     timings_ms: Dict[str, int] = Field(default_factory=dict)
+    output_lang: str = Field("ko", description="최종 사용자 표시/응답 언어")
+    menu_country_code: str = Field("", description="OCR로 추정한 메뉴판 국가 코드")
+    menu_ocr_lang: str = Field("", description="실제 OCR에 사용된 언어 코드")
+    menu_ocr_lang_source: str = Field("", description="OCR 언어 결정 방식(auto/manual)")
 
 
 class TranslateInput(BaseModel):

@@ -1,4 +1,5 @@
 import re
+from statistics import median
 from typing import List, Optional
 
 from app.agents._0_contracts import OCRLine, OCRMenuJudgeOutput, OCRTextLabel
@@ -62,13 +63,13 @@ Decision process:
 
 Label as menu_item only if the answer is clearly yes.
 
-Important rules:
-- Preserve OCR text exactly in this step.
-- Classify every line exactly once using the same index.
-- Be conservative when uncertain.
-- If a line mixes a product identity with secondary details, classify based on the primary role of the line.
-- A line should be menu_item only when it is a clean orderable name. If description, slogan, taste notes, or explanatory copy are mixed in, prefer description/other.
-- If a line mainly looks like a set/menu-board phrase rather than a concrete dish name, do NOT label it as menu_item.
+	Important rules:
+	- Preserve OCR text exactly in this step.
+	- Classify every line exactly once using the same index.
+	- Be conservative when uncertain.
+	- If a line mixes a product identity with secondary details, classify based on the primary role of the line.
+	- A line should be menu_item only when it is a clean orderable name. If description, slogan, taste notes, or explanatory copy are mixed in, prefer description/other.
+	- If a line mainly looks like a set/menu-board phrase rather than a concrete dish name, do NOT label it as menu_item.
 - If a line contains a dish name plus a trailing standalone number or price fragment, treat the price part as secondary detail, not part of the menu identity.
 - If a line is mostly a marketing phrase, set-title fragment, audience/serving-count phrase, or descriptive copy, do NOT label it as menu_item unless a concrete orderable product identity is clearly present.
 - Prefer precision over recall: false positives are worse than missing a borderline menu item.
@@ -80,6 +81,11 @@ Visual grouping rule:
 - Only treat fragments as one menu name when they appear to be parts of the same inline product name on the same row or baseline.
 - Do NOT merge vertically stacked title + description text, side badges, left/right gutter labels, section labels, or nearby explanatory copy into one menu item just because they are visually close.
 - Do not invent unsupported text, but do use the image to understand whether fragmented OCR tokens are part of one orderable offering.
+Visual emphasis rule:
+- Within the same local menu block, a larger, bolder, darker, or more visually prominent line is more likely to be the true menu_item.
+- Within the same local menu block, a smaller, lighter, denser, or lower-contrast line is more likely to be description, option_modifier, quantity_portion, or other supporting text.
+- If a prominent title line is followed by one or more smaller or lighter lines, prefer labeling only the prominent title as menu_item and the following lines as description or option text unless they are clearly separate products.
+- Use visual emphasis only as a relative local cue. Do not assume every large line is a menu item or every small line is a description without supporting context.
 {image_rule}
 
 OCR lines:
@@ -101,16 +107,129 @@ Return JSON only:
 class OCRMenuJudgeAgent:
     """OCR 텍스트 묶음 + 메뉴 이미지를 Gemma에 넣어 라벨링하는 최소 Agent."""
 
+    CHINESE_LANGS = {"ch", "chinese_cht"}
+    CHINESE_PRICE_RE = re.compile(r"^(?:[$¥]?\s*)?(?:\d+(?:[.,]\d+)?\s*元?|元+|\d+)$")
+    CHINESE_INDEX_RE = re.compile(r"^[\(\[（【]?\s*\d{1,3}\s*[\)\]）】]?$")
+    CHINESE_STORE_RE = re.compile(r"(欢迎|歡迎|www\.|nipic|昵图网|by[:：]|no[:：])", re.IGNORECASE)
+    CHINESE_HEADER_RE = re.compile(r"^(?:菜谱|菜單|菜单|.+类)$")
+    CHINESE_HEADER_WORDS = {
+        "菜谱",
+        "菜單",
+        "菜单",
+        "热菜",
+        "凉菜",
+        "燒烤",
+        "烧烤",
+        "汤类",
+        "湯類",
+        "汤",
+        "湯",
+        "肉类",
+        "肉類",
+        "素类",
+        "素類",
+        "海鲜类",
+        "海鮮類",
+        "主食",
+        "酒水",
+        "饮品",
+        "飲品",
+    }
+    CHINESE_MENU_METHOD_CUES = {
+        "炒",
+        "烧",
+        "燒",
+        "烤",
+        "炖",
+        "燉",
+        "煸",
+        "炸",
+        "拌",
+        "煮",
+        "煲",
+        "锅",
+        "鍋",
+        "汤",
+        "湯",
+        "麻辣",
+        "红烧",
+        "紅燒",
+        "家常",
+        "回锅",
+        "回鍋",
+        "明炉",
+        "明爐",
+        "锡纸",
+        "錫紙",
+        "凉拌",
+        "涼拌",
+    }
+    CHINESE_MENU_FOOD_CUES = {
+        "羊",
+        "牛",
+        "鸡",
+        "雞",
+        "鸭",
+        "鴨",
+        "鱼",
+        "魚",
+        "虾",
+        "蝦",
+        "肉",
+        "肠",
+        "腸",
+        "腰",
+        "肚",
+        "肝",
+        "翅",
+        "腿",
+        "脖",
+        "头",
+        "頭",
+        "珍",
+        "宝",
+        "寶",
+        "鞭",
+        "串",
+        "筋",
+        "骨",
+        "尾",
+        "排骨",
+        "龙虾",
+        "龍蝦",
+        "豆腐",
+        "豆角",
+        "土豆",
+        "木耳",
+        "玉米",
+        "茄子",
+        "蘑菇",
+        "香菇",
+        "香蘑",
+        "青瓜",
+        "黄瓜",
+        "黃瓜",
+        "油麦菜",
+        "油麥菜",
+        "生菜",
+        "鸡蛋",
+        "雞蛋",
+        "疙瘩",
+        "菌",
+        "面",
+        "麵",
+    }
+
     def __init__(self, gemma: GemmaClient):
         self.gemma = gemma
 
-    def run(self, texts: List[str]) -> OCRMenuJudgeOutput:
+    def run(self, texts: List[str], ocr_lang: Optional[str] = None) -> OCRMenuJudgeOutput:
         candidates = normalize_list(texts, limit=300)
         lines = [OCRLine(text=t, confidence=1.0, bbox=[]) for t in candidates]
-        return self.run_lines(lines)
+        return self.run_lines(lines, ocr_lang=ocr_lang)
 
-    def run_lines(self, lines: List[OCRLine]) -> OCRMenuJudgeOutput:
-        return self.run_lines_with_image(lines=lines, image_bytes=None, image_mime=None)
+    def run_lines(self, lines: List[OCRLine], ocr_lang: Optional[str] = None) -> OCRMenuJudgeOutput:
+        return self.run_lines_with_image(lines=lines, image_bytes=None, image_mime=None, ocr_lang=ocr_lang)
 
     def run_lines_with_image(
         self,
@@ -118,11 +237,18 @@ class OCRMenuJudgeAgent:
         image_bytes: Optional[bytes] = None,
         image_mime: Optional[str] = None,
         use_image_context: bool = True,
+        ocr_lang: Optional[str] = None,
     ) -> OCRMenuJudgeOutput:
         normalized_lines = self._normalize_lines(lines)
         if not normalized_lines:
             return OCRMenuJudgeOutput(items=[], menu_texts=[])
         source_lines = normalized_lines
+        normalized_lang = (ocr_lang or "").strip().lower()
+
+        if normalized_lang in self.CHINESE_LANGS:
+            chinese_output = self._run_chinese_layout_strategy(source_lines)
+            if chinese_output.menu_texts:
+                return chinese_output
 
         if use_image_context and image_bytes and image_mime:
             label_map = self._extract_labels_with_image(source_lines, image_bytes, image_mime)
@@ -140,6 +266,341 @@ class OCRMenuJudgeAgent:
             [it.text for it in out_items if it.label == "menu_item" and it.is_menu]
         )
         return OCRMenuJudgeOutput(items=out_items, menu_texts=menu_texts)
+
+    @classmethod
+    def _run_chinese_layout_strategy(cls, source_lines: List[OCRLine]) -> OCRMenuJudgeOutput:
+        items: List[OCRTextLabel] = []
+        for line in source_lines:
+            label = cls._classify_chinese_line(line)
+            items.append(OCRTextLabel(text=line.text, label=label, is_menu=(label == "menu_item")))
+
+        candidates = cls._collect_chinese_direct_candidates(source_lines)
+        candidates.extend(cls._recover_chinese_vertical_candidates(source_lines))
+        candidates.sort(key=lambda item: (item[1], item[2], cls._norm(item[0])))
+
+        menu_texts = cls._postprocess_chinese_menu_texts([text for text, _, _ in candidates])
+        return OCRMenuJudgeOutput(items=items, menu_texts=menu_texts)
+
+    @classmethod
+    def _classify_chinese_line(cls, line: OCRLine) -> str:
+        text = cls._compact_text(line.text)
+        if not text:
+            return "other"
+        if cls._is_chinese_store_info(text):
+            return "store_info"
+        if cls._is_chinese_header(text):
+            return "category_header"
+        if cls._is_chinese_price(text):
+            return "price"
+        if cls._is_chinese_index(text):
+            return "quantity_portion"
+        if cls._is_horizontal_chinese_menu_candidate(line):
+            return "menu_item"
+        return "other"
+
+    @classmethod
+    def _collect_chinese_direct_candidates(cls, source_lines: List[OCRLine]) -> List[tuple[str, float, float]]:
+        candidates: List[tuple[str, float, float]] = []
+        for line in source_lines:
+            if not cls._is_horizontal_chinese_menu_candidate(line):
+                continue
+            left, top, _, _, _, _ = cls._bbox_rect(line.bbox)
+            cleaned = cls._clean_chinese_candidate_text(line.text)
+            if not cls._is_valid_chinese_menu_candidate(cleaned):
+                continue
+            candidates.append((cleaned, top, left))
+        return candidates
+
+    @classmethod
+    def _recover_chinese_vertical_candidates(cls, source_lines: List[OCRLine]) -> List[tuple[str, float, float]]:
+        char_tokens, char_heights, char_widths = cls._build_chinese_char_tokens(source_lines)
+        if len(char_tokens) < 4:
+            return []
+
+        row_tol = max(10.0, (median(char_heights) if char_heights else 16.0) * 0.75)
+        gap_threshold = max(34.0, (median(char_widths) if char_widths else 18.0) * 1.8)
+        section_ranges = cls._build_chinese_section_ranges(source_lines)
+
+        candidates: List[tuple[str, float, float]] = []
+        for left_bound, right_bound in section_ranges:
+            section_tokens = [
+                token for token in char_tokens
+                if left_bound <= token["x"] <= right_bound
+            ]
+            if len(section_tokens) < 2:
+                continue
+            section_tokens.sort(key=lambda token: token["y"])
+
+            rows: List[dict] = []
+            for token in section_tokens:
+                if not rows or abs(token["y"] - rows[-1]["y"]) > row_tol:
+                    rows.append({"y": token["y"], "tokens": [token]})
+                else:
+                    rows[-1]["tokens"].append(token)
+                    count = len(rows[-1]["tokens"])
+                    rows[-1]["y"] = ((rows[-1]["y"] * (count - 1)) + token["y"]) / count
+
+            for row in rows:
+                tokens = sorted(row["tokens"], key=lambda token: token["x"])
+                segments = cls._split_chinese_row_tokens(tokens, gap_threshold)
+                for segment in segments:
+                    if not segment:
+                        continue
+                    text = "".join(token["ch"] for token in segment)
+                    cleaned = cls._clean_chinese_candidate_text(text)
+                    if not cls._is_valid_chinese_menu_candidate(cleaned):
+                        continue
+                    candidates.append((cleaned, row["y"], segment[0]["x"]))
+        return candidates
+
+    @classmethod
+    def _build_chinese_char_tokens(
+        cls,
+        source_lines: List[OCRLine],
+    ) -> tuple[List[dict], List[float], List[float]]:
+        tokens: List[dict] = []
+        char_heights: List[float] = []
+        char_widths: List[float] = []
+
+        for line in source_lines:
+            text = cls._compact_text(line.text)
+            if not text or cls._is_chinese_store_info(text) or cls._is_chinese_header(text) or cls._is_chinese_price(text):
+                continue
+            if cls._is_horizontal_chinese_menu_candidate(line):
+                continue
+
+            left, top, right, bottom, width, height = cls._bbox_rect(line.bbox)
+            han_chars = [ch for ch in text if cls._is_chinese_candidate_char(ch)]
+            if not han_chars:
+                continue
+
+            if cls._is_vertical_chinese_text_line(line):
+                step = max(1.0, height / max(len(han_chars), 1))
+                x_center = (left + right) / 2.0
+                for idx, ch in enumerate(han_chars):
+                    tokens.append(
+                        {
+                            "x": x_center,
+                            "y": top + ((idx + 0.5) * step),
+                            "ch": ch,
+                            "w": width,
+                            "h": step,
+                        }
+                    )
+                    char_heights.append(step)
+                    char_widths.append(width)
+                continue
+
+            if len(han_chars) <= 3:
+                step = max(1.0, width / max(len(han_chars), 1))
+                y_center = (top + bottom) / 2.0
+                for idx, ch in enumerate(han_chars):
+                    tokens.append(
+                        {
+                            "x": left + ((idx + 0.5) * step),
+                            "y": y_center,
+                            "ch": ch,
+                            "w": step,
+                            "h": height,
+                        }
+                    )
+                    char_heights.append(height)
+                    char_widths.append(step)
+
+        return tokens, char_heights, char_widths
+
+    @classmethod
+    def _build_chinese_section_ranges(cls, source_lines: List[OCRLine]) -> List[tuple[float, float]]:
+        header_centers: List[float] = []
+        for line in source_lines:
+            text = cls._compact_text(line.text)
+            if not cls._is_chinese_header(text):
+                continue
+            if not text.endswith("类"):
+                continue
+            left, _, right, _, _, _ = cls._bbox_rect(line.bbox)
+            header_centers.append((left + right) / 2.0)
+
+        if not header_centers:
+            return [(-10**9, 10**9)]
+
+        header_centers.sort()
+        merged: List[float] = []
+        for center in header_centers:
+            if not merged or abs(center - merged[-1]) > 70.0:
+                merged.append(center)
+            else:
+                merged[-1] = (merged[-1] + center) / 2.0
+
+        if len(merged) == 1:
+            return [(-10**9, 10**9)]
+
+        boundaries: List[float] = [-10**9]
+        for idx in range(len(merged) - 1):
+            boundaries.append((merged[idx] + merged[idx + 1]) / 2.0)
+        boundaries.append(10**9)
+        return list(zip(boundaries[:-1], boundaries[1:]))
+
+    @staticmethod
+    def _split_chinese_row_tokens(tokens: List[dict], gap_threshold: float) -> List[List[dict]]:
+        if not tokens:
+            return []
+        segments: List[List[dict]] = [[tokens[0]]]
+        for prev, cur in zip(tokens, tokens[1:]):
+            if (cur["x"] - prev["x"]) > gap_threshold:
+                segments.append([cur])
+                continue
+            segments[-1].append(cur)
+        return segments
+
+    @classmethod
+    def _postprocess_chinese_menu_texts(cls, menu_texts: List[str]) -> List[str]:
+        out: List[str] = []
+        seen = set()
+        for text in menu_texts:
+            cleaned = cls._clean_chinese_candidate_text(text)
+            if not cls._is_valid_chinese_menu_candidate(cleaned):
+                continue
+            key = cls._norm(cleaned)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(cleaned)
+        return out
+
+    @classmethod
+    def _is_horizontal_chinese_menu_candidate(cls, line: OCRLine) -> bool:
+        text = cls._compact_text(line.text)
+        if not text:
+            return False
+        if cls._is_chinese_store_info(text) or cls._is_chinese_header(text) or cls._is_chinese_price(text) or cls._is_chinese_index(text):
+            return False
+        if not cls._has_han(text):
+            return False
+
+        _, _, _, _, width, height = cls._bbox_rect(line.bbox)
+        han_count = cls._han_char_count(text)
+        if han_count < 2 or han_count > 8:
+            return False
+        if height > 0 and width < (height * 1.1):
+            return False
+        return cls._is_valid_chinese_menu_candidate(text)
+
+    @classmethod
+    def _is_vertical_chinese_text_line(cls, line: OCRLine) -> bool:
+        text = cls._compact_text(line.text)
+        if not text or not cls._has_han(text):
+            return False
+        if cls._is_chinese_store_info(text) or cls._is_chinese_header(text) or cls._is_chinese_price(text):
+            return False
+        _, _, _, _, width, height = cls._bbox_rect(line.bbox)
+        return height > (width * 1.3) and len(text) >= 2
+
+    @classmethod
+    def _clean_chinese_candidate_text(cls, text: str) -> str:
+        compact = cls._compact_text(text)
+        if not compact:
+            return ""
+        compact = re.sub(r"[（）()\[\]【】·.,，:：;；、/\\]+", "", compact)
+        compact = compact.replace("元", "")
+        compact = re.sub(r"\d+", "", compact)
+        return compact.strip()
+
+    @classmethod
+    def _is_valid_chinese_menu_candidate(cls, text: str) -> bool:
+        compact = cls._clean_chinese_candidate_text(text)
+        if not compact:
+            return False
+        if cls._is_chinese_store_info(compact) or cls._is_chinese_header(compact):
+            return False
+        han_count = cls._han_char_count(compact)
+        if han_count < 2 or han_count > 8:
+            return False
+        if cls._repeated_char_ratio(compact) > 0.6:
+            return False
+        if not cls._has_chinese_menu_cue(compact):
+            return False
+        return True
+
+    @classmethod
+    def _is_chinese_store_info(cls, text: str) -> bool:
+        compact = cls._compact_text(text)
+        if not compact:
+            return False
+        if cls.CHINESE_STORE_RE.search(compact):
+            return True
+        return "欢迎您" in compact or "歡迎您" in compact
+
+    @classmethod
+    def _is_chinese_header(cls, text: str) -> bool:
+        compact = cls._compact_text(text)
+        if not compact:
+            return False
+        if compact in cls.CHINESE_HEADER_WORDS:
+            return True
+        return cls.CHINESE_HEADER_RE.fullmatch(compact) is not None
+
+    @classmethod
+    def _is_chinese_price(cls, text: str) -> bool:
+        compact = cls._compact_text(text)
+        if not compact:
+            return False
+        return cls.CHINESE_PRICE_RE.fullmatch(compact) is not None
+
+    @classmethod
+    def _is_chinese_index(cls, text: str) -> bool:
+        compact = cls._compact_text(text)
+        if not compact:
+            return False
+        return cls.CHINESE_INDEX_RE.fullmatch(compact) is not None
+
+    @staticmethod
+    def _compact_text(text: str) -> str:
+        return "".join((text or "").split()).strip()
+
+    @staticmethod
+    def _has_han(text: str) -> bool:
+        return any(0x4E00 <= ord(ch) <= 0x9FFF for ch in text or "")
+
+    @staticmethod
+    def _han_char_count(text: str) -> int:
+        return sum(1 for ch in text or "" if 0x4E00 <= ord(ch) <= 0x9FFF)
+
+    @staticmethod
+    def _is_chinese_candidate_char(ch: str) -> bool:
+        return (0x4E00 <= ord(ch) <= 0x9FFF) and ch not in {"元", "类"}
+
+    @staticmethod
+    def _repeated_char_ratio(text: str) -> float:
+        if not text:
+            return 0.0
+        counts = {}
+        for ch in text:
+            counts[ch] = counts.get(ch, 0) + 1
+        return max(counts.values(), default=0) / float(len(text))
+
+    @classmethod
+    def _has_chinese_menu_cue(cls, text: str) -> bool:
+        compact = cls._clean_chinese_candidate_text(text)
+        if not compact:
+            return False
+        if any(token in compact for token in cls.CHINESE_MENU_METHOD_CUES):
+            return True
+        if any(token in compact for token in cls.CHINESE_MENU_FOOD_CUES):
+            return True
+        return False
+
+    @staticmethod
+    def _bbox_rect(bbox: List[List[float]]) -> tuple[float, float, float, float, float, float]:
+        if not bbox:
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        xs = [point[0] for point in bbox]
+        ys = [point[1] for point in bbox]
+        left = min(xs)
+        right = max(xs)
+        top = min(ys)
+        bottom = max(ys)
+        return left, top, right, bottom, max(0.0, right - left), max(0.0, bottom - top)
 
     def _extract_labels_with_image(
         self,

@@ -17,7 +17,7 @@ def build_parser():
         default="debug/ocr_only_result.json",
         help="OCR 결과 JSON 저장 경로",
     )
-    parser.add_argument("--menu-country-code", default="KR", help="메뉴판 언어 국가 코드(ISO-3166 alpha-2)")
+    parser.add_argument("--menu-country-code", default="AUTO", help="메뉴판 OCR 언어 힌트. 모르면 AUTO")
     parser.add_argument("--min-confidence", type=float, default=0.5, help="OCR confidence 임계값")
     parser.add_argument("--with-preprocess", action="store_true", help="전처리 후 OCR 실행")
     parser.add_argument(
@@ -71,10 +71,21 @@ def main():
     print(f"with preprocess  : {args.with_preprocess}")
     if args.with_preprocess:
         print(f"preprocessed     : {args.preprocessed_out}")
-    print(f"resolved ocr lang: {ocr.lang}")
+    print(f"resolved ocr lang: {out.resolved_lang or ocr.lang}")
+    print(f"lang source      : {out.lang_detection_source or ocr.lang_source}")
     print(f"line count       : {len(out.lines)}")
     print(f"timings(ms)      : load={t_load}, preprocess={t_pre}, ocr={t_ocr}")
     print("")
+
+    if out.lang_detection_candidates:
+        print("--- LANG CANDIDATES ---")
+        for idx, cand in enumerate(out.lang_detection_candidates, start=1):
+            print(
+                f"[{idx:02d}] lang={cand.lang} score={cand.score:.3f} "
+                f"lines={cand.line_count} conf={cand.avg_confidence:.3f} "
+                f"script={cand.script_ratio:.3f}"
+            )
+        print("")
 
     top_n = max(0, int(args.top))
     for idx, line in enumerate(out.lines[:top_n], start=1):
@@ -88,7 +99,7 @@ def main():
         "with_preprocess": bool(args.with_preprocess),
         "preprocessed_image": args.preprocessed_out if args.with_preprocess else "",
         "menu_country_code": args.menu_country_code,
-        "ocr_lang_resolved": ocr.lang,
+        "ocr_lang_resolved": out.resolved_lang or ocr.lang,
         "timings_ms": {"load": t_load, "preprocess": t_pre, "ocr": t_ocr},
         "options": opts.model_dump() if hasattr(opts, "model_dump") else opts.dict(),
         "result": out.model_dump() if hasattr(out, "model_dump") else out.dict(),
