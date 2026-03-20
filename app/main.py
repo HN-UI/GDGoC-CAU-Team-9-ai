@@ -7,8 +7,11 @@ from app.agents._eval_3_extractor import OCRMenuJudgeAgent
 from app.agents._eval_1_img_preprocessor import ImagePreprocessAgent
 from app.utils.image_io import load_image
 from app.utils.menu_item_cleaner import clean_menu_candidates
+from app.utils.env_loader import load_local_env
 from app.clients.gemma_client import GemmaClient
 from app.services.step2_rank import MenuRanker
+
+load_local_env()
 
 gemma = GemmaClient(api_key=os.getenv("GOOGLE_API_KEY"))
 ocr = OCRAgent(menu_country_code="AUTO")

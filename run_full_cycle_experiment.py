@@ -5,6 +5,7 @@ from pathlib import Path
 
 from app.agents._0_orchestrator import MenuAgentOrchestrator
 from app.clients.gemma_client import GemmaClient
+from app.utils.env_loader import load_local_env
 
 
 def build_parser():
@@ -57,7 +58,8 @@ def require_api_key():
         return api_key
     raise SystemExit(
         "[ERROR] GOOGLE_API_KEY가 설정되어 있지 않습니다.\n"
-        "예: export GOOGLE_API_KEY='your-key'"
+        "예: export GOOGLE_API_KEY='your-key'\n"
+        "또는 프로젝트 루트 .env에 GOOGLE_API_KEY=... 를 추가하세요."
     )
 
 
@@ -122,6 +124,7 @@ def print_summary(result, args, resolved_image_source: str):
 
 
 def main():
+    loaded_env_path = load_local_env()
     parser = build_parser()
     args = parser.parse_args()
 
@@ -130,6 +133,12 @@ def main():
         image_source = str(Path(image_source).expanduser().resolve())
 
     api_key = require_api_key()
+    if loaded_env_path:
+        print(f"[INFO] Loaded env file: {loaded_env_path}")
+    if os.getenv("GOOGLE_VISION_API_KEY"):
+        print("[INFO] Vision key source: GOOGLE_VISION_API_KEY")
+    else:
+        print("[INFO] Vision key source: GOOGLE_API_KEY fallback")
     gemma = GemmaClient(api_key=api_key, model=args.model)
     orchestrator = MenuAgentOrchestrator(gemma, uncertainty_penalty=40)
 

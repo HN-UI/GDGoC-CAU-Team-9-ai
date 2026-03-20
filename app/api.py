@@ -9,9 +9,11 @@ from app.agents._0_contracts import FinalResponse, TranslateOutput
 from app.agents._0_orchestrator import ImageLoadError, MenuAgentOrchestrator
 from app.agents._eval_2_ocr import OCRAgent
 from app.clients.gemma_client import GemmaClient
+from app.utils.env_loader import load_local_env
 
 
 app = FastAPI(title="Menu AI API", version="0.1")
+load_local_env()
 
 # --- singletons ---
 gemma = GemmaClient(
