@@ -73,6 +73,10 @@ class RankRequest(BaseModel):
     )
     avoid: List[str] = Field(default_factory=list, description="기피 재료 리스트")
     user_lang: Optional[str] = Field(None, description="사용자/응답 언어(ko/en/es)")
+    menu_lang: Optional[str] = Field(
+        None,
+        description="메뉴판 OCR 언어(ko/en/es). 주어지면 자동 언어 탐지를 생략",
+    )
     menu_country_code: Optional[str] = Field(
         None,
         description="메뉴판 OCR 언어 힌트. 모르면 AUTO",
@@ -107,11 +111,13 @@ def health():
 def rank(req: RankRequest):
     try:
         user_lang = ((req.user_lang if req.user_lang is not None else req.lang) or "ko")
+        menu_lang = (req.menu_lang or "auto")
         menu_country_code = ((req.menu_country_code if req.menu_country_code is not None else req.country_code) or "AUTO")
         result = orchestrator.run(
             req.image_url,
             req.avoid,
             user_lang=user_lang,
+            menu_lang=menu_lang,
             menu_country_code=menu_country_code,
             presigned_url=req.presigned_url,
         )

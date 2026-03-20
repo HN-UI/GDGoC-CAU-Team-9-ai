@@ -10,7 +10,10 @@ __pycache__/
 .venv2/
 venv/
 tests
+debug
 
 # mac
 .DS_Store
-menu.png
+menu_image
+py_test
+

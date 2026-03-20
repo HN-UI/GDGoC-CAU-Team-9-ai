@@ -24,6 +24,22 @@ NON_TEXT_RE = re.compile(r"[\s\-_–—:;,.|/\\•·*()\[\]{}<>]+")
 VOLUME_SUFFIX_RE = re.compile(r"(?<=\d)m\b", re.IGNORECASE)
 VOLUME_LIKE_RE = re.compile(r"(?:\d+(?:\.\d+)?)\s*(?:ml|l|oz|g|kg|mg|인분|잔|병|캔|pc|pcs)\b", re.IGNORECASE)
 REPEATED_BRAND_RE = re.compile(r"^([a-z가-힣])\1+$", re.IGNORECASE)
+BADGE_TOKEN_STRIP_RE = re.compile(r"^[\s\[\]\(\)\{\}<>【】「」'\"`~!@#$%^&*_+=|\\:;,.?/·★☆\-]+|[\s\[\]\(\)\{\}<>【】「」'\"`~!@#$%^&*_+=|\\:;,.?/·★☆\-]+$")
+SINGLE_COMMA_JOINER_SUFFIX_RE = re.compile(
+    r",\s*(?:y|e|and|&)\s+[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'’/\-]*(?:\s+[A-Za-zÀ-ÖØ-öø-ÿ][A-Za-zÀ-ÖØ-öø-ÿ'’/\-]*)?$",
+    re.IGNORECASE,
+)
+MENU_BADGE_TOKENS = {
+    "best",
+    "hot",
+    "new",
+    "베스트",
+    "추천",
+}
+ALCOHOL_STRENGTH_RE = re.compile(r"(?:\(\s*)?\d+(?:\.\d+)?\s*(?:%|℃|도)(?:\s*\))?", re.IGNORECASE)
+KOREAN_TITLE_DESCRIPTION_SPLIT_RE = re.compile(
+    r"^(.{2,32}?(?:솥밥|전골|스키야키|볶음|덮밥|파스타|피자|버거|스테이크|찌개|탕|국밥|우동|라면|면|죽|순두부|냉면|칼국수|돈까스|가츠|초밥|롤))\s+(.+)$"
+)
 
 
 def _normalize_rule_text(text: str) -> str:
@@ -101,6 +117,29 @@ PARTICIPLE_HINTS = _normalized_terms(
     }
 )
 PARTICLE_TOKEN_ENDINGS = ("으로", "에서", "에게", "에는", "와", "과", "의")
+KOREAN_DESCRIPTION_TAIL_CUES = _normalized_terms(
+    {
+        "짭조름",
+        "고소",
+        "매콤",
+        "달콤",
+        "바삭",
+        "쫄깃",
+        "부드러",
+        "특제",
+        "국내산",
+        "계절",
+        "조화",
+        "풍미",
+        "식감",
+        "숙성",
+        "들어",
+        "가득",
+        "함께",
+        "느껴지",
+        "어우러",
+    }
+)
 
 
 @dataclass
@@ -242,7 +281,7 @@ def _drop_reason(candidate: MenuCleanCandidate) -> str:
         return "no_letter_like_chars"
     if metrics["informative_count"] <= 1:
         return "too_little_information"
-    if metrics["letter_ratio"] < 0.45:
+    if metrics["letter_ratio"] < 0.45 and not _looks_like_numeric_detail_menu_item(text, metrics):
         return "low_letter_ratio"
     if compact in SECTION_HEADER_HINTS:
         return "generic_category_header"
@@ -347,7 +386,7 @@ def _drop_contextual_generics(candidates: List[MenuCleanCandidate]) -> List[Menu
             item.reasons.append("contextual_brand_title")
             continue
 
-        if _contains_any(item.compact_text, MARKETING_HINTS) and item.metrics["token_count"] <= 2:
+        if _contains_any(item.compact_text, MARKETING_HINTS) and item.metrics["token_count"] <= 3:
             item.status = "dropped"
             item.reasons.append("contextual_marketing_title")
 
@@ -509,7 +548,47 @@ def _normalize_common_menu_text(text: str) -> tuple[str, List[str]]:
         current = updated
         reasons.append("normalized_volume_suffix")
 
+    updated = _strip_badge_tokens(current, from_left=True)
+    if updated != current:
+        current = updated
+        reasons.append("stripped_leading_badge")
+
+    updated = _strip_badge_tokens(current, from_left=False)
+    if updated != current:
+        current = updated
+        reasons.append("stripped_trailing_badge")
+
+    updated, trimmed = _trim_korean_mixed_title_tail(current)
+    if trimmed:
+        current = updated
+        reasons.append("trimmed_mixed_description_tail")
+
     return current, reasons
+
+
+def _strip_badge_tokens(text: str, from_left: bool) -> str:
+    tokens = text.split()
+    if not tokens:
+        return text
+
+    changed = False
+    while tokens:
+        idx = 0 if from_left else -1
+        token = tokens[idx]
+        token_key = BADGE_TOKEN_STRIP_RE.sub("", token).casefold()
+        if token_key not in MENU_BADGE_TOKENS:
+            break
+        if len(tokens) == 1:
+            break
+        changed = True
+        if from_left:
+            tokens = tokens[1:]
+        else:
+            tokens = tokens[:-1]
+
+    if not changed:
+        return text
+    return " ".join(tokens).strip()
 
 
 def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
@@ -533,8 +612,48 @@ def _particle_like_token_count(text: str) -> int:
     return count
 
 
+def _looks_like_numeric_detail_menu_item(text: str, metrics: Dict[str, float]) -> bool:
+    if metrics["letter_count"] < 2:
+        return False
+    if VOLUME_LIKE_RE.search(text):
+        return True
+    if ALCOHOL_STRENGTH_RE.search(text):
+        return True
+    return False
+
+
+def _trim_korean_mixed_title_tail(text: str) -> tuple[str, bool]:
+    if not any("가" <= ch <= "힣" for ch in text):
+        return text, False
+
+    match = KOREAN_TITLE_DESCRIPTION_SPLIT_RE.match(text)
+    if not match:
+        return text, False
+
+    title = match.group(1).strip()
+    tail = match.group(2).strip()
+    if not title or not tail:
+        return text, False
+
+    title_tokens = title.split()
+    if len(title_tokens) >= 2 and _looks_like_repeated_brand(_compact_text(title_tokens[0])):
+        return text, False
+
+    tail_compact = _compact_text(tail)
+    if not tail_compact or len(tail.split()) < 2:
+        return text, False
+
+    if _contains_any(tail_compact, KOREAN_DESCRIPTION_TAIL_CUES):
+        # 숫자/가격이 붙은 라인은 메뉴명 일부일 가능성이 더 높아 보수적으로 유지한다.
+        if re.search(r"(?:원|krw|usd|eur|cny|jpy|元|円|\d)", tail, re.IGNORECASE):
+            return text, False
+        return title, True
+
+    return text, False
+
+
 def _looks_like_description_text(text: str, compact_text: str, metrics: Dict[str, float]) -> bool:
-    if ", " in text and len(text.split()) >= 4:
+    if ", " in text and len(text.split()) >= 4 and not _looks_like_menu_single_comma_conjunction(text, metrics):
         return True
     if _contains_any(compact_text, SENTENCE_ENDING_HINTS):
         return True
@@ -543,6 +662,19 @@ def _looks_like_description_text(text: str, compact_text: str, metrics: Dict[str
     if _particle_like_token_count(text) >= 2 and metrics["token_count"] >= 3:
         return True
     return False
+
+
+def _looks_like_menu_single_comma_conjunction(text: str, metrics: Dict[str, float]) -> bool:
+    normalized = " ".join((text or "").split()).strip()
+    if not normalized:
+        return False
+    if normalized.count(",") != 1:
+        return False
+    if any(mark in normalized for mark in (".", ";", ":")):
+        return False
+    if metrics.get("token_count", 0.0) > 10:
+        return False
+    return bool(SINGLE_COMMA_JOINER_SUFFIX_RE.search(normalized))
 
 
 def _looks_like_repeated_brand(text: str) -> bool:

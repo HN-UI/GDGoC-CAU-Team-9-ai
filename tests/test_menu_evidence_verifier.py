@@ -134,6 +134,22 @@ class MenuEvidenceVerifierTest(unittest.TestCase):
         self.assertEqual(out[0].avoid_evidence[0].evidence_type, "weak_inference")
         self.assertLessEqual(out[0].avoid_evidence[0].confidence, 0.25)
 
+    def test_menu_signal_fallback_matches_beef_for_steak(self):
+        item = RiskItem(
+            menu="토시 스테이크 솥밥",
+            confidence=0.6,
+            suspects=[],
+            matched_avoid=[],
+            suspected_ingredients=[],
+        )
+
+        out = verify_risk_items([item], avoid_terms=["소고기"], lang="ko")
+
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].matched_avoid, ["소고기"])
+        self.assertEqual(len(out[0].avoid_evidence), 1)
+        self.assertIn(out[0].avoid_evidence[0].evidence_type, {"alias", "menu_prior", "direct"})
+
 
 if __name__ == "__main__":
     unittest.main()

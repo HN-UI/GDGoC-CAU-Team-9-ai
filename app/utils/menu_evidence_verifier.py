@@ -429,6 +429,60 @@ def _merge_verified_suspects(
     )
 
 
+def _infer_fallback_pairs_from_menu(
+    menu_name: str,
+    allowed_canonicals: set[str],
+    evidence_catalog: dict,
+    matched_avoid_already: set[str],
+) -> List[tuple[str, RiskSuspect]]:
+    inferred_canonicals = _infer_menu_ingredient_canonicals(menu_name, evidence_catalog)
+    out: List[tuple[str, RiskSuspect]] = []
+
+    for inferred in inferred_canonicals:
+        matched_avoid = find_matching_avoid_canonical(inferred, allowed_canonicals)
+        if matched_avoid is None:
+            continue
+        if matched_avoid in matched_avoid_already:
+            continue
+
+        entry = evidence_catalog.get(inferred, {})
+        direct_hit = _match_any(menu_name, entry.get("direct", []))
+        strong_hit = _match_any(menu_name, entry.get("strong", []))
+        prior_hit = _match_any(menu_name, entry.get("prior", []))
+
+        evidence_type = "weak_inference"
+        evidence_text = None
+        confidence = 0.25
+
+        if direct_hit:
+            evidence_type = "direct"
+            evidence_text = direct_hit
+            confidence = 0.85
+        elif strong_hit:
+            evidence_type = "alias"
+            evidence_text = strong_hit
+            confidence = 0.75
+        elif prior_hit:
+            evidence_type = "menu_prior"
+            evidence_text = prior_hit
+            confidence = 0.60
+
+        out.append(
+            (
+                matched_avoid,
+                RiskSuspect(
+                    canonical=inferred,
+                    evidence_type=evidence_type,
+                    evidence_text=evidence_text,
+                    reason="menu signal fallback",
+                    confidence=confidence,
+                ),
+            )
+        )
+
+    return out
+
+
 def verify_risk_items(risk_items: List[RiskItem], avoid_terms: List[str], lang: str = "ko") -> List[RiskItem]:
     if not risk_items:
         return []
@@ -465,6 +519,22 @@ def verify_risk_items(risk_items: List[RiskItem], avoid_terms: List[str], lang: 
                 verified = _soft_fallback_verify(suspect)
             if verified is not None:
                 verified_pairs.append((matched_avoid_canonical, verified))
+
+        # LLM이 suspect를 누락해도 메뉴명 자체에 강한 시그널(예: 스테이크, 제육)이 있으면
+        # 기피 재료 매칭 근거를 보수적으로 보강한다.
+        matched_avoid_already = {
+            matched
+            for matched, _ in verified_pairs
+            if isinstance(matched, str) and matched.strip()
+        }
+        verified_pairs.extend(
+            _infer_fallback_pairs_from_menu(
+                menu_name=item.menu,
+                allowed_canonicals=allowed_canonicals,
+                evidence_catalog=evidence_catalog,
+                matched_avoid_already=matched_avoid_already,
+            )
+        )
 
         verified_pairs = _merge_verified_suspects(verified_pairs)
         verified_pairs = _resolve_canonical_conflicts(item.menu, verified_pairs, evidence_catalog)

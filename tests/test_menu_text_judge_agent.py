@@ -154,6 +154,73 @@ class OCRMenuJudgeAgentTest(unittest.TestCase):
 
         self.assertIn("Combinacion de Camarones Churrasco,yChorizo", out.menu_texts)
 
+    def test_korean_rule_recovers_title_prefix_from_description_line(self):
+        fake = _FakeGemma(
+            [
+                '{"line_labels": ['
+                '{"index": 0, "text": "명란 버터 솥밥 짭조름 한 명란 과 고소한 버터 의", "label": "description"},'
+                '{"index": 1, "text": "야채 가 가득 들어 있는", "label": "description"}'
+                "]}",
+            ]
+        )
+        agent = OCRMenuJudgeAgent(fake)
+        lines = [
+            OCRLine(text="명란 버터 솥밥 짭조름 한 명란 과 고소한 버터 의", confidence=1.0, bbox=[]),
+            OCRLine(text="야채 가 가득 들어 있는", confidence=1.0, bbox=[]),
+        ]
+        out = agent.run_lines_with_image(
+            lines,
+            image_bytes=b"abc",
+            image_mime="image/png",
+            use_image_context=True,
+            ocr_lang="ko",
+        )
+
+        self.assertIn("명란 버터 솥밥", out.menu_texts)
+        self.assertNotIn("야채 가 가득 들어 있는", out.menu_texts)
+
+    def test_spanish_rule_recovers_main_items_from_inline_price_and_split_price_lines(self):
+        fake = _FakeGemma(
+            [
+                '{"line_labels": ['
+                '{"index": 0, "text": "Tapas Calientes", "label": "description"},'
+                '{"index": 1, "text": "Mussels / Mejillones | 18 GF Sautéed with Marinara Sauce .", "label": "description"},'
+                '{"index": 2, "text": "Calamares Fritos | 18 Fried Calamari .", "label": "description"},'
+                '{"index": 3, "text": "Chorizo Español | 18 GF Sautéed Sausage with Onions .", "label": "description"},'
+                '{"index": 4, "text": "Croquetas De Jamon | 13 Homemade Ham Croquettes .", "label": "description"},'
+                '{"index": 5, "text": "Empanadillas", "label": "description"},'
+                '{"index": 6, "text": "13", "label": "description"},'
+                '{"index": 7, "text": "Combinación de Camarones , | 24 GF Churrasco , y Chorizo", "label": "description"}'
+                "]}",
+            ]
+        )
+        agent = OCRMenuJudgeAgent(fake)
+        lines = [
+            OCRLine(text="Tapas Calientes", confidence=1.0, bbox=[]),
+            OCRLine(text="Mussels / Mejillones | 18 GF Sautéed with Marinara Sauce .", confidence=1.0, bbox=[]),
+            OCRLine(text="Calamares Fritos | 18 Fried Calamari .", confidence=1.0, bbox=[]),
+            OCRLine(text="Chorizo Español | 18 GF Sautéed Sausage with Onions .", confidence=1.0, bbox=[]),
+            OCRLine(text="Croquetas De Jamon | 13 Homemade Ham Croquettes .", confidence=1.0, bbox=[]),
+            OCRLine(text="Empanadillas", confidence=1.0, bbox=[]),
+            OCRLine(text="13", confidence=1.0, bbox=[]),
+            OCRLine(text="Combinación de Camarones , | 24 GF Churrasco , y Chorizo", confidence=1.0, bbox=[]),
+        ]
+        out = agent.run_lines_with_image(
+            lines,
+            image_bytes=b"abc",
+            image_mime="image/png",
+            use_image_context=True,
+            ocr_lang="es",
+        )
+
+        self.assertIn("Mussels / Mejillones", out.menu_texts)
+        self.assertIn("Calamares Fritos", out.menu_texts)
+        self.assertIn("Chorizo Español", out.menu_texts)
+        self.assertIn("Croquetas De Jamon", out.menu_texts)
+        self.assertIn("Empanadillas", out.menu_texts)
+        self.assertTrue(any(item.startswith("Combinación de Camarones") and "Chorizo" in item for item in out.menu_texts))
+        self.assertNotIn("Tapas Calientes", out.menu_texts)
+
 
 if __name__ == "__main__":
     unittest.main()

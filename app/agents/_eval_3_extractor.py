@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from app.agents._0_contracts import OCRLine, OCRMenuJudgeOutput, OCRTextLabel
 from app.clients.gemma_client import GemmaClient
+from app.utils.menu_item_cleaner import clean_menu_candidates
 from app.utils.parsing import extract_first_json_object, normalize_list
 
 
@@ -108,8 +109,17 @@ class OCRMenuJudgeAgent:
     """OCR 텍스트 묶음 + 메뉴 이미지를 Gemma에 넣어 라벨링하는 최소 Agent."""
 
     SPANISH_LANGS = {"es"}
+    KOREAN_LANGS = {"ko", "korean", "kr"}
     SPANISH_PRICE_SUFFIX_RE = re.compile(
         r"(?:(?:[|,:]\s*|\s+)\d{1,3}(?:[.,]\d+)?|(?<=\D)\d{1,3}(?:[.,]\d+)?)\s*(?:[A-Z]{1,8}(?:/[A-Z]{1,8})*)?\s*$",
+        re.IGNORECASE,
+    )
+    SPANISH_PRICE_TOKEN_RE = re.compile(
+        r"(?:[|,:]\s*|\s+|(?<=\D))\d{1,3}(?:[.,]\d+)?(?:\s*[A-Z]{1,8}(?:/[A-Z]{1,8})*)?",
+        re.IGNORECASE,
+    )
+    SPANISH_STANDALONE_PRICE_RE = re.compile(
+        r"^[|,:]?\s*\d{1,3}(?:[.,]\d+)?\s*(?:[A-Z]{1,8}(?:/[A-Z]{1,8})*)?\s*$",
         re.IGNORECASE,
     )
     SPANISH_DESCRIPTION_CUES = (
@@ -286,9 +296,58 @@ class OCRMenuJudgeAgent:
             spanish_rule_items = self._collect_spanish_title_candidates(source_lines)
             if spanish_rule_items:
                 menu_candidates = spanish_rule_items
+        elif normalized_lang in self.KOREAN_LANGS:
+            # Google Vision OCR는 한국어에서 "메뉴명 + 설명 꼬리"가 한 줄로 붙는 경우가 많다.
+            # LLM이 description으로 분류한 줄에서 메뉴명 prefix를 보수적으로 복구한다.
+            korean_rule_items = self._collect_korean_title_candidates(source_lines, out_items)
+            if korean_rule_items:
+                menu_candidates = self._merge_menu_candidates(menu_candidates, korean_rule_items)
 
         menu_texts = self._postprocess_menu_texts(menu_candidates)
         return OCRMenuJudgeOutput(items=out_items, menu_texts=menu_texts)
+
+    @classmethod
+    def _collect_korean_title_candidates(
+        cls,
+        source_lines: List[OCRLine],
+        labeled_items: List[OCRTextLabel],
+    ) -> List[str]:
+        out: List[str] = []
+        seen = set()
+
+        for line, labeled in zip(source_lines, labeled_items):
+            if labeled.label == "menu_item":
+                continue
+
+            clean_result = clean_menu_candidates([line.text])
+            if not clean_result.cleaned_items:
+                continue
+
+            candidate = clean_result.cleaned_items[0]
+            if cls._norm(candidate) == cls._norm(line.text):
+                # 분류기와 동일하게 보이는 줄은 복구 근거가 약해 제외한다.
+                continue
+
+            key = cls._norm(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(candidate)
+
+        return out
+
+    @classmethod
+    def _merge_menu_candidates(cls, base: List[str], recovered: List[str]) -> List[str]:
+        out: List[str] = []
+        seen = set()
+
+        for text in [*base, *recovered]:
+            key = cls._norm(text)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(text)
+        return out
 
     @classmethod
     def _collect_spanish_title_candidates(cls, source_lines: List[OCRLine]) -> List[str]:
@@ -296,13 +355,19 @@ class OCRMenuJudgeAgent:
         seen = set()
         for idx, line in enumerate(source_lines):
             title, has_price, may_continue = cls._extract_spanish_title_from_line(line.text)
-            if not has_price:
-                continue
-            if not cls._is_spanish_menu_title_candidate(title):
-                continue
+            if has_price:
+                if not cls._is_spanish_menu_title_candidate(title):
+                    continue
+            else:
+                # Recover menu names when OCR splits title and price into separate lines
+                # (e.g., "Empanadillas" + next line "13").
+                if not cls._is_spanish_menu_title_candidate(title):
+                    continue
+                if not cls._has_nearby_spanish_standalone_price(source_lines, idx):
+                    continue
 
             merged = title
-            if may_continue:
+            if has_price and may_continue:
                 continuation = cls._find_spanish_title_continuation(source_lines, idx)
                 if continuation:
                     merged = f"{merged} {continuation}".strip()
@@ -324,6 +389,20 @@ class OCRMenuJudgeAgent:
         normalized = " ".join((text or "").split()).strip()
         if not normalized:
             return "", False, False
+
+        inline_match = cls.SPANISH_PRICE_TOKEN_RE.search(normalized)
+        if inline_match is not None:
+            raw_title = normalized[: inline_match.start()].strip()
+            if raw_title:
+                trailing = normalized[inline_match.end() :].strip()
+                marker_char = normalized[inline_match.start()] if inline_match.start() < len(normalized) else ""
+                may_continue = raw_title.endswith((",", "/", "&")) or marker_char in {",", "/", "&"}
+                normalized = raw_title.rstrip(".,:;|/\\- ").strip()
+                inline_continuation = cls._normalize_spanish_inline_continuation(trailing)
+                if inline_continuation:
+                    normalized = f"{normalized} {inline_continuation}".strip()
+                    may_continue = False
+                return normalized, True, may_continue
 
         match = cls.SPANISH_PRICE_SUFFIX_RE.search(normalized)
         if match is not None:
@@ -362,7 +441,7 @@ class OCRMenuJudgeAgent:
             return False
 
         words = text.split()
-        if len(words) > 6:
+        if len(words) > 8:
             return False
         if not any(ch.isalpha() for ch in text):
             return False
@@ -407,6 +486,51 @@ class OCRMenuJudgeAgent:
 
         continuation = continuation.rstrip(".,:;|/\\- ").strip()
         return continuation
+
+    @classmethod
+    def _normalize_spanish_inline_continuation(cls, text: str) -> str:
+        continuation = " ".join((text or "").split()).strip()
+        if not continuation:
+            return ""
+        if len(continuation) > 32:
+            return ""
+        lowered = continuation.casefold()
+        if any(cue in lowered for cue in cls.SPANISH_DESCRIPTION_CUES):
+            return ""
+        if continuation.endswith("."):
+            return ""
+        if continuation.startswith("("):
+            return ""
+        if not any(ch.isalpha() for ch in continuation):
+            return ""
+
+        words = continuation.split()
+        if len(words) > 4:
+            return ""
+        first = words[0].casefold() if words else ""
+        if first not in {"de", "y", "con"} and words and words[0][0].isalpha() and words[0][0].islower():
+            return ""
+
+        continuation = continuation.lstrip(",/& ").strip()
+        continuation = continuation.rstrip(".,:;|/\\- ").strip()
+        return continuation
+
+    @classmethod
+    def _has_nearby_spanish_standalone_price(cls, source_lines: List[OCRLine], center_idx: int) -> bool:
+        for offset in (-1, 1, -2, 2, 3):
+            idx = center_idx + offset
+            if idx < 0 or idx >= len(source_lines):
+                continue
+            candidate = " ".join((source_lines[idx].text or "").split()).strip()
+            if cls._is_spanish_standalone_price_line(candidate):
+                return True
+        return False
+
+    @classmethod
+    def _is_spanish_standalone_price_line(cls, text: str) -> bool:
+        if not text:
+            return False
+        return bool(cls.SPANISH_STANDALONE_PRICE_RE.fullmatch(text))
 
     @classmethod
     def _run_chinese_layout_strategy(cls, source_lines: List[OCRLine]) -> OCRMenuJudgeOutput:

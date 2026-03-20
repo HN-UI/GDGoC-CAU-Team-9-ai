@@ -48,11 +48,13 @@ class MenuAgentOrchestrator:
         image_url: str,
         avoid: List[str],
         user_lang: str = "ko",
+        menu_lang: str = "auto",
         menu_country_code: str = "AUTO",
         presigned_url: str = "",
     ) -> FinalResponse:
         requested_user_lang = (user_lang or "ko").strip().lower()
         lang = requested_user_lang if requested_user_lang in {"ko", "en", "es"} else "ko"
+        resolved_menu_lang = self._resolve_menu_lang(menu_lang)
         t_total = time.perf_counter()
         timings_ms = {}
 
@@ -71,7 +73,10 @@ class MenuAgentOrchestrator:
         timings_ms["preprocess"] = self._elapsed_ms(t_preprocess)
 
         t_extract = time.perf_counter()
-        ocr = OCRAgent(menu_country_code=menu_country_code)
+        ocr = OCRAgent(
+            menu_country_code=menu_country_code,
+            ocr_lang_override=resolved_menu_lang,
+        )
         ocr_out = ocr.run(data)
         resolved_menu_country_code = self._resolve_menu_country_code(ocr_out.resolved_lang)
         judged = self.extract_agent.run_lines_with_image(
@@ -161,9 +166,10 @@ class MenuAgentOrchestrator:
         bbox_target_menus = self._pick_top_bbox_targets(scored_items, top_k=3)
         bbox_image_url = ""
         bbox_image_local_path = ""
+        bbox_upload_ms = 0
         if bbox_target_menus:
             try:
-                bbox_image_url, matched_targets, bbox_image_local_path = self.bbox_agent.run(
+                bbox_image_url, matched_targets, bbox_image_local_path, bbox_upload_ms = self.bbox_agent.run(
                     image_bytes=raw_data,
                     targets=bbox_target_menus,
                     top_k=3,
@@ -175,6 +181,7 @@ class MenuAgentOrchestrator:
                 # bbox 생성/업로드 실패는 메인 랭킹 응답을 깨지 않도록 삼킨다.
                 bbox_image_url = ""
         timings_ms["bbox"] = self._elapsed_ms(t_bbox)
+        timings_ms["bbox_upload"] = int(max(0, bbox_upload_ms))
 
         # best는 정렬된 리스트의 첫 항목을 사용해 reason 번역 결과와 일치시킨다.
         best = scored_items[0] if scored_items else None
@@ -254,6 +261,22 @@ class MenuAgentOrchestrator:
             "es": "ES",
         }
         return mapping.get((detected_ocr_lang or "").strip().lower(), "")
+
+    @staticmethod
+    def _resolve_menu_lang(menu_lang: Optional[str]) -> Optional[str]:
+        aliases = {
+            "auto": None,
+            "ko": "ko",
+            "kr": "ko",
+            "korean": "ko",
+            "en": "en",
+            "es": "es",
+            "spanish": "es",
+        }
+        key = (menu_lang or "").strip().lower()
+        if not key:
+            return None
+        return aliases.get(key)
 
     def _localize_item_menus(self, items: List[ScoredItem], lang: str) -> None:
         target_lang = lang if lang in {"ko", "en", "es"} else "en"

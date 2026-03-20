@@ -2,6 +2,7 @@ import base64
 import io
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Sequence, Tuple
@@ -221,23 +222,27 @@ class MenuBBoxHighlighterAgent:
         targets: Sequence[str],
         top_k: int = 3,
         upload_presigned_url: str = "",
-    ) -> Tuple[str, List[str], str]:
+    ) -> Tuple[str, List[str], str, int]:
         normalized_targets = self._normalize_targets(targets, limit=top_k)
         if not image_bytes or not normalized_targets:
-            return "", normalized_targets, ""
-        if not self.vision_api_key:
-            return "", normalized_targets, ""
+            return "", normalized_targets, "", 0
 
-        data = self._predict(image_bytes)
-        polygons, matched_targets = self._collect_target_boxes(data, normalized_targets)
-        if not polygons:
-            return "", normalized_targets, ""
+        # 기본값은 원본 업로드. bbox를 찾으면 박스가 그려진 이미지로 대체한다.
+        output_image = image_bytes
+        matched_targets: List[str] = []
+        if self.vision_api_key:
+            data = self._predict(image_bytes)
+            polygons, matched_targets = self._collect_target_boxes(data, normalized_targets)
+            if polygons:
+                output_image = self._draw_boxes(image_bytes, polygons)
 
-        boxed_image = self._draw_boxes(image_bytes, polygons)
-        local_image_path = self._save_local(boxed_image)
+        local_image_path = self._save_local(output_image)
         uploaded_url = ""
+        upload_elapsed_ms = 0
+        t_upload = time.perf_counter()
         if upload_presigned_url:
-            uploaded_url = self._upload_to_presigned_url(upload_presigned_url, boxed_image)
+            uploaded_url = self._upload_to_presigned_url(upload_presigned_url, output_image)
         else:
-            uploaded_url = self._upload_and_presign(boxed_image)
-        return uploaded_url, matched_targets or normalized_targets, local_image_path
+            uploaded_url = self._upload_and_presign(output_image)
+        upload_elapsed_ms = int(max(0, round((time.perf_counter() - t_upload) * 1000)))
+        return uploaded_url, matched_targets, local_image_path, upload_elapsed_ms

@@ -29,6 +29,12 @@ def build_parser():
         help="메뉴판 OCR 언어 힌트. 모르면 AUTO",
     )
     parser.add_argument(
+        "--menu-lang",
+        default="auto",
+        choices=["auto", "ko", "en", "es"],
+        help="메뉴판 OCR 언어. 주면 자동 언어탐지를 생략",
+    )
+    parser.add_argument(
         "--avoid",
         nargs="*",
         default=["계란", "우유"],
@@ -69,10 +75,12 @@ def print_summary(result, args, resolved_image_source: str):
     print("=" * 72)
     print(f"Image Source      : {resolved_image_source}")
     print(f"User Language     : {args.user_lang}")
+    print(f"Menu Lang Hint    : {args.menu_lang}")
     print(f"Output Language   : {result.output_lang or '-'}")
     print(f"Menu Country Code : {result.menu_country_code or '-'}")
     print(f"Menu OCR Lang     : {result.menu_ocr_lang or '-'} ({result.menu_ocr_lang_source or '-'})")
     print(f"Avoid Ingredients : {', '.join(args.avoid) if args.avoid else '-'}")
+    print(f"OCR Timeout(sec)  : {os.getenv('OCR_VISION_TIMEOUT_SEC', '-')}")
     print()
 
     print("[Extracted Menus]")
@@ -146,6 +154,7 @@ def main():
         image_url=image_source,
         avoid=args.avoid,
         user_lang=args.user_lang,
+        menu_lang=args.menu_lang,
         menu_country_code=args.menu_country_code,
         presigned_url=args.presigned_url,
     )
