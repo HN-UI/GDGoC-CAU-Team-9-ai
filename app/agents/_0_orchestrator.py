@@ -206,6 +206,7 @@ class MenuAgentOrchestrator:
         fallback_risk_items = [
             RiskItem(
                 menu=menu,
+                menu_original=menu,
                 risk=100,
                 confidence=0.0,
                 suspected_ingredients=[],

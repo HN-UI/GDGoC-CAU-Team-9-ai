@@ -133,30 +133,20 @@ class TranslateAgentTest(unittest.TestCase):
         self.assertEqual(out.items[0].provider, "identity_same_lang")
 
     @patch("app.agents._0_translate_agent.requests.post")
-    def test_refines_mixed_language_output_for_korean_target(self, mock_post):
+    def test_uses_source_based_override_instead_of_retranslating_google_output(self, mock_post):
         fake = FakeGemma("not json")
 
-        first = Mock()
-        first.raise_for_status.return_value = None
-        first.content = b"ok"
-        first.json.return_value = {
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.content = b"ok"
+        response.json.return_value = {
             "data": {
                 "translations": [
                     {"translatedText": "duck empanadas"},
                 ]
             }
         }
-        second = Mock()
-        second.raise_for_status.return_value = None
-        second.content = b"ok"
-        second.json.return_value = {
-            "data": {
-                "translations": [
-                    {"translatedText": "오리 엠파나다"},
-                ]
-            }
-        }
-        mock_post.side_effect = [first, second]
+        mock_post.return_value = response
 
         with patch.dict(
             os.environ,
@@ -169,7 +159,44 @@ class TranslateAgentTest(unittest.TestCase):
             out = agent.run(TranslateInput(texts=["Duck Empanadas"], source_lang="en", target_lang="ko"))
 
         self.assertEqual(out.items[0].translated, "오리 엠파나다")
-        self.assertEqual(out.items[0].provider, "google_translate_v2_refine")
+        self.assertEqual(out.items[0].provider, "google_translate_v2_override")
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch("app.agents._0_translate_agent.requests.post")
+    def test_unresolved_google_mixed_output_falls_back_to_gemma_from_original(self, mock_post):
+        fake = FakeGemma(
+            """
+            {
+              "items": [
+                {"original": "Unknown Dish", "translated": "알 수 없는 요리", "confidence": 0.92}
+              ]
+            }
+            """
+        )
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.content = b"ok"
+        response.json.return_value = {
+            "data": {
+                "translations": [
+                    {"translatedText": "unknown dish"},
+                ]
+            }
+        }
+        mock_post.return_value = response
+
+        with patch.dict(
+            os.environ,
+            {
+                "GOOGLE_TRANSLATE_API_KEY": "dummy-key",
+            },
+            clear=False,
+        ):
+            agent = TranslateAgent(fake)
+            out = agent.run(TranslateInput(texts=["Unknown Dish"], source_lang="en", target_lang="ko"))
+
+        self.assertEqual(out.items[0].translated, "알 수 없는 요리")
+        self.assertEqual(out.items[0].provider, "gemma_translate")
 
 
 if __name__ == "__main__":

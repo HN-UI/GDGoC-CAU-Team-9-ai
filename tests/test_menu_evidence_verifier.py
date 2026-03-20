@@ -150,6 +150,25 @@ class MenuEvidenceVerifierTest(unittest.TestCase):
         self.assertEqual(len(out[0].avoid_evidence), 1)
         self.assertIn(out[0].avoid_evidence[0].evidence_type, {"alias", "menu_prior", "direct"})
 
+    def test_uses_menu_original_when_display_menu_is_localized(self):
+        item = RiskItem(
+            menu="스페인 초리소",
+            menu_original="Chorizo Espanol",
+            confidence=0.6,
+            suspects=[],
+            matched_avoid=[],
+            suspected_ingredients=[],
+        )
+
+        out = verify_risk_items([item], avoid_terms=["돼지고기"], lang="ko")
+
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].menu, "Chorizo Espanol")
+        self.assertEqual(out[0].menu_original, "Chorizo Espanol")
+        self.assertEqual(out[0].matched_avoid, ["돼지고기"])
+        self.assertEqual(len(out[0].avoid_evidence), 1)
+        self.assertIn(out[0].avoid_evidence[0].evidence_type, {"alias", "menu_prior", "direct"})
+
 
 if __name__ == "__main__":
     unittest.main()

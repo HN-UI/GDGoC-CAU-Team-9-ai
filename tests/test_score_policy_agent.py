@@ -148,6 +148,35 @@ class ScorePolicyAgentTest(unittest.TestCase):
         by_menu = {item.menu: item for item in result.items}
         self.assertGreater(by_menu["Multi"].risk, by_menu["Single"].risk)
 
+    def test_prefers_menu_original_for_menu_profile_and_output(self):
+        agent = ScorePolicyAgent()
+        req = ScorePolicyInput(
+            risk_items=[
+                RiskItem(
+                    menu="스페인 초리소",
+                    menu_original="Chorizo Espanol",
+                    confidence=0.8,
+                    matched_avoid=["돼지고기"],
+                    avoid_evidence=[
+                        AvoidEvidence(
+                            ingredient="돼지고기",
+                            canonical="pork",
+                            evidence_type="alias",
+                            confidence=0.8,
+                            evidence_text="Chorizo",
+                        )
+                    ],
+                )
+            ],
+            uncertainty_penalty=40,
+        )
+
+        result = agent.run(req)
+
+        self.assertEqual(len(result.items), 1)
+        self.assertEqual(result.items[0].menu, "Chorizo Espanol")
+        self.assertEqual(result.items[0].menu_original, "Chorizo Espanol")
+
 
 if __name__ == "__main__":
     unittest.main()

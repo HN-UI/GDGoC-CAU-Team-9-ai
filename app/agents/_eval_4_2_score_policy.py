@@ -133,8 +133,8 @@ class ScorePolicyAgent:
             scored_pairs.append(
                 (
                     ScoredItem(
-                        menu=it.menu,
-                        menu_original=it.menu,
+                        menu=self._original_menu_name(it),
+                        menu_original=self._original_menu_name(it),
                         score=final_score,
                         risk=final_risk,
                         confidence=display_confidence,
@@ -347,9 +347,10 @@ class ScorePolicyAgent:
 
     @classmethod
     def _build_menu_profile(cls, item) -> dict:
-        generic_hits = cls._collect_term_hits(item.menu, cls.GENERIC_TITLE_TERMS)
-        catalog_hits = cls._collect_term_hits(item.menu, cls._GLOBAL_SPECIFIC_MENU_TERMS)
-        dish_hits = cls._collect_term_hits(item.menu, cls.SPECIFIC_DISH_TERMS)
+        menu_name = cls._original_menu_name(item)
+        generic_hits = cls._collect_term_hits(menu_name, cls.GENERIC_TITLE_TERMS)
+        catalog_hits = cls._collect_term_hits(menu_name, cls._GLOBAL_SPECIFIC_MENU_TERMS)
+        dish_hits = cls._collect_term_hits(menu_name, cls.SPECIFIC_DISH_TERMS)
         strong_evidence_hits = [
             ev for ev in item.avoid_evidence if ev.evidence_type in {"direct", "alias", "menu_prior"}
         ]
@@ -369,3 +370,11 @@ class ScorePolicyAgent:
             "specific_signal_count": specific_signal_count,
             "is_generic_only": bool(generic_hits) and specific_signal_count == 0,
         }
+
+    @staticmethod
+    def _original_menu_name(item) -> str:
+        menu_original = getattr(item, "menu_original", "")
+        if isinstance(menu_original, str) and menu_original.strip():
+            return menu_original
+        menu = getattr(item, "menu", "")
+        return menu if isinstance(menu, str) else ""

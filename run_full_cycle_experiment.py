@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 from app.agents._0_orchestrator import MenuAgentOrchestrator
@@ -54,6 +55,11 @@ def build_parser():
         "--json",
         action="store_true",
         help="최종 결과를 JSON으로만 출력",
+    )
+    parser.add_argument(
+        "--debug-translation",
+        action="store_true",
+        help="번역 단계 입력/출력/provider와 최종 menu 값을 stderr로 출력",
     )
     return parser
 
@@ -149,6 +155,8 @@ def main():
         print("[INFO] Vision key source: GOOGLE_API_KEY fallback")
     gemma = GemmaClient(api_key=api_key, model=args.model)
     orchestrator = MenuAgentOrchestrator(gemma, uncertainty_penalty=40)
+    if args.debug_translation:
+        _install_translation_debug_hooks(orchestrator)
 
     result = orchestrator.run(
         image_url=image_source,
@@ -159,12 +167,69 @@ def main():
         presigned_url=args.presigned_url,
     )
 
+    if args.debug_translation:
+        _print_final_menu_debug(result)
+
     if args.json:
         payload = result.model_dump() if hasattr(result, "model_dump") else result.dict()
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
 
     print_summary(result, args, image_source)
+
+def _install_translation_debug_hooks(orchestrator: MenuAgentOrchestrator) -> None:
+    translate_agent = orchestrator.translate_agent
+    original_google = translate_agent._translate_with_google
+    original_run = translate_agent.run
+
+    def debug_google(*args, **kwargs):
+        texts = kwargs.get("texts") or (args[0] if args else [])
+        source_lang = kwargs.get("source_lang") or (args[1] if len(args) > 1 else "auto")
+        target_lang = kwargs.get("target_lang") or (args[2] if len(args) > 2 else "en")
+        print(
+            f"[DEBUG][GOOGLE] request count={len(texts)} source={source_lang} target={target_lang}",
+            file=sys.stderr,
+        )
+        try:
+            result = original_google(*args, **kwargs)
+        except Exception as exc:
+            print(f"[DEBUG][GOOGLE] error={type(exc).__name__}: {exc}", file=sys.stderr)
+            raise
+        print(f"[DEBUG][GOOGLE] success count={len(result)}", file=sys.stderr)
+        for src, item in result.items():
+            print(
+                f"[DEBUG][GOOGLE] {src} => {item.translated} | provider={item.provider}",
+                file=sys.stderr,
+            )
+        return result
+
+    def debug_run(request):
+        print(
+            f"[DEBUG][TRANSLATE] source={request.source_lang} target={request.target_lang} count={len(request.texts)}",
+            file=sys.stderr,
+        )
+        for src in request.texts:
+            print(f"[DEBUG][TRANSLATE][IN] {src}", file=sys.stderr)
+        output = original_run(request)
+        for item in output.items:
+            print(
+                f"[DEBUG][TRANSLATE][OUT] {item.original} => {item.translated} | provider={item.provider}",
+                file=sys.stderr,
+            )
+        return output
+
+    translate_agent._translate_with_google = debug_google
+    translate_agent.run = debug_run
+
+
+def _print_final_menu_debug(result) -> None:
+    print("[DEBUG][FINAL] ranked menus", file=sys.stderr)
+    for item in result.items:
+        print(
+            f"[DEBUG][FINAL] menu={item.menu} | original={item.menu_original} | "
+            f"score={item.score} | risk={item.risk}",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

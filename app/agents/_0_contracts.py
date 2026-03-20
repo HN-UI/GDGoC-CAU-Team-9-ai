@@ -96,6 +96,7 @@ class RiskSuspect(BaseModel):
 
 class RiskItem(BaseModel):
     menu: str = Field(..., description="입력 메뉴명과 동일한 원문")
+    menu_original: str = Field("", description="추론/검증에 사용할 불변 원문 메뉴명")
     risk: int = Field(0, ge=0, le=100, description="deprecated placeholder; 최종 risk는 score policy에서 계산")
     confidence: float = Field(0.0, ge=0.0, le=1.0, description="메뉴 단위 평가 신뢰도")
     suspected_ingredients: List[str] = Field(

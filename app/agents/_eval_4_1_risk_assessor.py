@@ -59,6 +59,7 @@ class RiskAssessAgent:
                 items=[
                     RiskItem(
                         menu=menu_name,
+                        menu_original=menu_name,
                         risk=0,
                         confidence=1.0,
                         suspected_ingredients=[],
@@ -425,6 +426,7 @@ OUTPUT: Return ONLY valid JSON (no markdown) with this schema:
             by_menu[menu] = (
                 RiskItem(
                     menu=menu,
+                    menu_original=menu,
                     risk=0,
                     confidence=conf,
                     suspected_ingredients=suspected,
@@ -446,6 +448,7 @@ OUTPUT: Return ONLY valid JSON (no markdown) with this schema:
             out.append(
                 RiskItem(
                     menu=menu_name,
+                    menu_original=menu_name,
                     risk=0,
                     confidence=0.0,
                     suspected_ingredients=[],

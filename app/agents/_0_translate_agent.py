@@ -1,6 +1,7 @@
 import html
 import os
 import re
+import unicodedata
 from typing import Dict, List, Tuple
 
 import requests
@@ -8,6 +9,82 @@ import requests
 from app.agents._0_contracts import TranslateInput, TranslateItem, TranslateOutput
 from app.clients.gemma_client import GemmaClient
 from app.utils.parsing import clamp_float, extract_first_json_object
+
+
+KO_GOOGLE_TRANSLATION_OVERRIDES = {
+    "aguacate con salpicon de mariscos": "해산물 살피콘 아보카도",
+    "baby pimiento rellenos": "속을 채운 작은 피망",
+    "calamares fritos": "튀긴 오징어",
+    "caldo gallego": "갈리시아 수프",
+    "camarones al ajillo": "마늘 새우",
+    "chorizo espanol": "스페인 초리소",
+    "chorizo español": "스페인 초리소",
+    "clams / almejas": "조개",
+    "clams casino": "클램 카지노",
+    "coconut shrimps": "코코넛 새우",
+    "combinacion de camarones churrasco , y chorizo": "새우, 추라스코, 초리소 조합",
+    "combinacion de camarones churrasco, y chorizo": "새우, 추라스코, 초리소 조합",
+    "combinación de camarones churrasco , y chorizo": "새우, 추라스코, 초리소 조합",
+    "combinación de camarones churrasco, y chorizo": "새우, 추라스코, 초리소 조합",
+    "croquetas de jamon": "하몽 크로케타",
+    "croquetas de jamón": "하몽 크로케타",
+    "duck empanadas": "오리 엠파나다",
+    "empanadillas": "엠파나디야",
+    "escargots": "에스카르고",
+    "mussels / mejillones": "홍합",
+    "patatas bravas": "파타타스 브라바스",
+    "pulpo a la gallega": "갈리시아식 문어",
+    "pulpo a la plancha": "구운 문어",
+    "tabla de quesos": "치즈 플래터",
+    "tabla de serrano": "세라노 플래터",
+    "tabla iberica": "이베리코 플래터",
+    "tabla ibérica": "이베리코 플래터",
+    "tortilla espanola": "스페인식 오믈렛",
+    "tortilla española": "스페인식 오믈렛",
+    "vieiras rellenas": "속을 채운 가리비",
+}
+
+KO_GOOGLE_TRANSLATION_GLOSSARY = (
+    ("seafood salad", "해산물 샐러드"),
+    ("seafood", "해산물"),
+    ("salpicon", "살피콘"),
+    ("salpicon", "살피콘"),
+    ("churrasco", "추라스코"),
+    ("chorizo", "초리소"),
+    ("serrano", "세라노"),
+    ("iberica", "이베리코"),
+    ("iberico", "이베리코"),
+    ("empanadillas", "엠파나디야"),
+    ("empanadas", "엠파나다"),
+    ("empanada", "엠파나다"),
+    ("croquettes", "크로케타"),
+    ("croqueta", "크로케타"),
+    ("ham", "햄"),
+    ("duck", "오리"),
+    ("shrimp", "새우"),
+    ("shrimps", "새우"),
+    ("mussels", "홍합"),
+    ("clams", "조개"),
+    ("scallops", "가리비"),
+    ("squid", "오징어"),
+    ("octopus", "문어"),
+    ("pepper", "피망"),
+    ("baby", "작은"),
+    ("stuffed", "속을 채운"),
+    ("filled", "속을 채운"),
+    ("board", "플래터"),
+    ("platter", "플래터"),
+    ("special", "스페셜"),
+    ("burger", "버거"),
+    ("pizza", "피자"),
+    ("pasta", "파스타"),
+    ("steak", "스테이크"),
+    ("lasagna", "라자냐"),
+    ("calamari", "오징어"),
+    ("escargots", "에스카르고"),
+)
+
+KO_LATIN_CONNECTOR_WORDS = {"a", "al", "and", "con", "de", "del", "la", "las", "of", "the", "y"}
 
 
 class TranslateAgent:
@@ -86,7 +163,11 @@ class TranslateAgent:
                 pass
 
         if by_original:
-            self._refine_google_outputs_to_target_lang(by_original, target_lang=target_lang)
+            self._postprocess_google_outputs(
+                by_original,
+                source_lang=source_lang,
+                target_lang=target_lang,
+            )
 
         # 2) Gemma fallback for missing items
         missing = [src for src in unique_texts if src not in by_original]
@@ -247,59 +328,68 @@ OUTPUT JSON ONLY:
             )
         return by_original
 
-    def _refine_google_outputs_to_target_lang(self, by_original: Dict[str, TranslateItem], target_lang: str) -> None:
-        # 한국어 대상일 때 라틴 문자가 섞인 결과를 한 번 더 Google 번역으로 정제한다.
+    def _postprocess_google_outputs(
+        self,
+        by_original: Dict[str, TranslateItem],
+        source_lang: str,
+        target_lang: str,
+    ) -> None:
         if target_lang != "ko":
             return
         if not by_original:
             return
 
-        src_keys: List[str] = []
-        refine_inputs: List[str] = []
-        for src, item in by_original.items():
+        unresolved_sources: List[str] = []
+        for src, item in list(by_original.items()):
             translated = (item.translated or "").strip()
-            if self._needs_target_lang_refine(translated=translated, target_lang=target_lang):
-                src_keys.append(src)
-                refine_inputs.append(translated)
+            if not translated:
+                unresolved_sources.append(src)
+                continue
 
-        if not refine_inputs:
-            return
-
-        try:
-            refined_map = self._translate_with_google(
-                texts=refine_inputs,
-                source_lang="auto",
+            refined_text, provider = self._postprocess_google_translation(
+                original=src,
+                translated=translated,
+                source_lang=source_lang,
                 target_lang=target_lang,
             )
-        except Exception:
-            return
-
-        for src, refine_input in zip(src_keys, refine_inputs):
-            refined_item = refined_map.get(refine_input)
-            if refined_item is None:
-                continue
-            refined_text = (refined_item.translated or "").strip()
-            if not refined_text:
+            if self._has_meaningful_latin_tokens(refined_text, target_lang=target_lang):
+                unresolved_sources.append(src)
                 continue
 
-            current = by_original.get(src)
-            if current is None:
-                continue
             by_original[src] = TranslateItem(
-                original=src,
+                original=item.original,
                 translated=refined_text,
-                confidence=max(current.confidence, refined_item.confidence),
-                provider="google_translate_v2_refine",
+                confidence=item.confidence,
+                provider=provider,
             )
 
-    @staticmethod
-    def _needs_target_lang_refine(translated: str, target_lang: str) -> bool:
-        text = (translated or "").strip()
-        if not text:
-            return False
-        if target_lang == "ko":
-            return bool(re.search(r"[A-Za-z]", text))
-        return False
+        for src in unresolved_sources:
+            by_original.pop(src, None)
+
+    def _postprocess_google_translation(
+        self,
+        original: str,
+        translated: str,
+        source_lang: str,
+        target_lang: str,
+    ) -> Tuple[str, str]:
+        cleaned = self._clean_translation_text(translated)
+        if target_lang != "ko":
+            return cleaned, "google_translate_v2"
+
+        override = KO_GOOGLE_TRANSLATION_OVERRIDES.get(self._normalize_lookup_key(original))
+        if override:
+            return override, "google_translate_v2_override"
+
+        postprocessed = cleaned
+        for term, replacement in sorted(KO_GOOGLE_TRANSLATION_GLOSSARY, key=lambda item: len(item[0]), reverse=True):
+            postprocessed = self._replace_case_insensitive(postprocessed, term, replacement)
+        postprocessed = self._clean_translation_text(postprocessed)
+
+        provider = "google_translate_v2"
+        if postprocessed != cleaned:
+            provider = "google_translate_v2_postprocessed"
+        return postprocessed, provider
 
     @staticmethod
     def _normalize_texts(xs, limit: int = 300):
@@ -338,6 +428,36 @@ OUTPUT JSON ONLY:
         if not allow_auto and resolved == "auto":
             return ""
         return resolved
+
+    @staticmethod
+    def _clean_translation_text(text: str) -> str:
+        cleaned = re.sub(r"\s+", " ", (text or "").strip())
+        cleaned = re.sub(r"\s+([,./)])", r"\1", cleaned)
+        cleaned = re.sub(r"([(])\s+", r"\1", cleaned)
+        return cleaned.strip()
+
+    @staticmethod
+    def _replace_case_insensitive(text: str, needle: str, replacement: str) -> str:
+        if not needle:
+            return text
+        pattern = re.compile(rf"(?<![A-Za-z]){re.escape(needle)}(?![A-Za-z])", flags=re.IGNORECASE)
+        return pattern.sub(replacement, text)
+
+    @staticmethod
+    def _has_meaningful_latin_tokens(text: str, target_lang: str) -> bool:
+        if target_lang != "ko":
+            return False
+        tokens = re.findall(r"[A-Za-z][A-Za-z'-]*", text or "")
+        meaningful = [token for token in tokens if token.casefold() not in KO_LATIN_CONNECTOR_WORDS]
+        return bool(meaningful)
+
+    @staticmethod
+    def _normalize_lookup_key(text: str) -> str:
+        cleaned = re.sub(r"\s+", " ", (text or "").strip().casefold())
+        cleaned = "".join(
+            ch for ch in unicodedata.normalize("NFKD", cleaned) if not unicodedata.combining(ch)
+        )
+        return cleaned
 
     @staticmethod
     def _safe_float_env(name: str, default: float, min_value: float = 0.0) -> float:

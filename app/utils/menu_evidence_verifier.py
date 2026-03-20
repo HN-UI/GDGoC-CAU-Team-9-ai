@@ -499,6 +499,9 @@ def verify_risk_items(risk_items: List[RiskItem], avoid_terms: List[str], lang: 
     for item in risk_items:
         if not isinstance(item, RiskItem):
             continue
+        menu_name = (item.menu_original or item.menu or "").strip()
+        if not menu_name:
+            menu_name = item.menu
 
         verified_pairs: List[tuple[str, RiskSuspect]] = []
         for suspect in item.suspects:
@@ -506,10 +509,10 @@ def verify_risk_items(risk_items: List[RiskItem], avoid_terms: List[str], lang: 
             if matched_avoid_canonical is None:
                 continue
             relation = _canonical_match_relation(suspect.canonical, matched_avoid_canonical)
-            verified = _verify_suspect(item.menu, suspect, evidence_catalog)
+            verified = _verify_suspect(menu_name, suspect, evidence_catalog)
             if verified is None:
                 verified = _fallback_verify_by_relation(
-                    item.menu,
+                    menu_name,
                     suspect,
                     relation,
                     matched_avoid_canonical,
@@ -529,7 +532,7 @@ def verify_risk_items(risk_items: List[RiskItem], avoid_terms: List[str], lang: 
         }
         verified_pairs.extend(
             _infer_fallback_pairs_from_menu(
-                menu_name=item.menu,
+                menu_name=menu_name,
                 allowed_canonicals=allowed_canonicals,
                 evidence_catalog=evidence_catalog,
                 matched_avoid_already=matched_avoid_already,
@@ -537,7 +540,7 @@ def verify_risk_items(risk_items: List[RiskItem], avoid_terms: List[str], lang: 
         )
 
         verified_pairs = _merge_verified_suspects(verified_pairs)
-        verified_pairs = _resolve_canonical_conflicts(item.menu, verified_pairs, evidence_catalog)
+        verified_pairs = _resolve_canonical_conflicts(menu_name, verified_pairs, evidence_catalog)
         verified_suspects = [suspect for _, suspect in verified_pairs]
 
         matched_avoid: List[str] = []
@@ -553,7 +556,7 @@ def verify_risk_items(risk_items: List[RiskItem], avoid_terms: List[str], lang: 
             display_name = get_display_name(canonical, lang=lang) if canonical in evidence_catalog else cleaned
             if display_name not in suspected_ingredients:
                 suspected_ingredients.append(display_name)
-        inferred_menu_canonicals = _infer_menu_ingredient_canonicals(item.menu, evidence_catalog)
+        inferred_menu_canonicals = _infer_menu_ingredient_canonicals(menu_name, evidence_catalog)
         for canonical in inferred_menu_canonicals:
             display_name = display_by_requested_canonical.get(
                 canonical,
@@ -587,7 +590,8 @@ def verify_risk_items(risk_items: List[RiskItem], avoid_terms: List[str], lang: 
 
         verified_items.append(
             RiskItem(
-                menu=item.menu,
+                menu=menu_name,
+                menu_original=menu_name,
                 risk=0,
                 confidence=item_confidence,
                 suspected_ingredients=suspected_ingredients,
