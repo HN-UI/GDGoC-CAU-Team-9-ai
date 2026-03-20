@@ -13,11 +13,9 @@ from app.agents._0_contracts import OCRLanguageCandidate, OCRLine, OCROptions, O
 class OCRAgent:
     """PaddleOCR text extractor with optional OCR-based language auto detection."""
 
-    DEFAULT_AUTO_LANGS: Tuple[str, ...] = ("korean", "ch", "en")
-    CJK_LANGS = {"korean", "japan", "ch", "chinese_cht"}
-    LATIN_LANGS = {"en", "es"}
-    TRADITIONAL_HINT_CHARS = set("體點為國東門風魚雞飯麵湯龍燒貓貝與灣麥車葉氣號")
-    SIMPLIFIED_HINT_CHARS = set("体点为国东门风鱼鸡饭面汤龙烧猫贝与湾麦车叶气号")
+    SUPPORTED_OCR_LANGS: Tuple[str, ...] = ("korean", "en", "es")
+    DEFAULT_AUTO_LANGS: Tuple[str, ...] = SUPPORTED_OCR_LANGS
+    CJK_LANGS = {"korean"}
     SPANISH_HINT_CHARS = set("áéíóúüñÁÉÍÓÚÜÑ¿¡")
     _PADDLE_OCR_CLASS = None
     _PADDLE_OCR_CLASS_LOCK = threading.Lock()
@@ -74,7 +72,7 @@ class OCRAgent:
             return OCROutput(lines=[], texts=[], resolved_lang="", lang_detection_source="")
 
         resolved_lang, lang_source, candidates = self._resolve_run_lang(image)
-        keep_bbox = bool(opts.include_bbox or resolved_lang in {"ch", "chinese_cht"})
+        keep_bbox = bool(opts.include_bbox)
         raw = self._run_ocr_raw(
             image=image,
             lang=resolved_lang,
@@ -260,8 +258,19 @@ class OCRAgent:
 
     @staticmethod
     def _sort_candidates(candidates: List[OCRLanguageCandidate]) -> List[OCRLanguageCandidate]:
+        # Tie-break rule:
+        # If en/es scores are identical, prefer Spanish for bilingual menus.
+        lang_priority = {"es": 2, "en": 1}
         ordered = list(candidates)
-        ordered.sort(key=lambda item: (item.score, item.line_count, item.avg_confidence), reverse=True)
+        ordered.sort(
+            key=lambda item: (
+                item.score,
+                item.line_count,
+                item.avg_confidence,
+                lang_priority.get((item.lang or "").strip().lower(), 0),
+            ),
+            reverse=True,
+        )
         return ordered
 
     def _should_early_exit(self, candidates: List[OCRLanguageCandidate]) -> bool:
@@ -325,7 +334,7 @@ class OCRAgent:
             "enable_mkldnn": True,
             "cpu_threads": cpu_threads,
         }
-        if lang in {"en", "ch", "chinese_cht"} and self.det_model_name:
+        if lang in {"en", "es"} and self.det_model_name:
             kwargs_v1["text_detection_model_name"] = self.det_model_name
 
         kwargs_v2 = {
@@ -415,7 +424,7 @@ class OCRAgent:
             if not isinstance(value, str):
                 continue
             lang = value.strip().lower()
-            if not lang or lang in seen:
+            if not lang or lang in seen or lang not in cls.SUPPORTED_OCR_LANGS:
                 continue
             seen.add(lang)
             out.append(lang)
@@ -427,14 +436,6 @@ class OCRAgent:
             "auto": None,
             "ko": "korean",
             "korean": "korean",
-            "ja": "japan",
-            "jp": "japan",
-            "japan": "japan",
-            "zh": "ch",
-            "zh-cn": "ch",
-            "zh-tw": "chinese_cht",
-            "ch": "ch",
-            "chinese_cht": "chinese_cht",
             "en": "en",
             "es": "es",
         }
@@ -449,13 +450,16 @@ class OCRAgent:
         country = country.replace("_", "-").split("-", 1)[0]
         country_to_lang = {
             "KR": "korean",
-            "JP": "japan",
-            "CN": "ch",
-            "TW": "chinese_cht",
-            "HK": "chinese_cht",
             "US": "en",
             "GB": "en",
+            "AU": "en",
+            "CA": "en",
             "ES": "es",
+            "MX": "es",
+            "AR": "es",
+            "CL": "es",
+            "CO": "es",
+            "PE": "es",
         }
         return country_to_lang.get(country)
 
@@ -523,21 +527,11 @@ class OCRAgent:
     def _expected_script_ratio(cls, texts: List[str], lang: str) -> float:
         profile = cls._character_profile(texts)
         hangul_ratio = profile["hangul_ratio"]
-        kana_ratio = profile["kana_ratio"]
-        han_ratio = profile["han_ratio"]
         latin_ratio = profile["latin_ratio"]
         spanish_ratio = profile["spanish_ratio"]
-        trad_ratio = profile["traditional_hint_ratio"]
-        simp_ratio = profile["simplified_hint_ratio"]
 
         if lang == "korean":
-            return min(1.0, hangul_ratio + (han_ratio * 0.15))
-        if lang == "japan":
-            return min(1.0, (kana_ratio * 1.6) + (han_ratio * 0.35))
-        if lang == "ch":
-            return min(1.0, han_ratio + (simp_ratio * 0.25))
-        if lang == "chinese_cht":
-            return min(1.0, han_ratio + (trad_ratio * 0.25))
+            return min(1.0, hangul_ratio)
         if lang == "es":
             return min(1.0, latin_ratio + (spanish_ratio * 0.35))
         if lang == "en":
@@ -549,30 +543,16 @@ class OCRAgent:
         joined = "".join(texts)
         signal_chars = 0
         hangul = 0
-        kana = 0
-        han = 0
         latin = 0
         spanish = 0
-        trad = 0
-        simp = 0
 
         for ch in joined:
             code = ord(ch)
             if ch in cls.SPANISH_HINT_CHARS:
                 spanish += 1
-            if ch in cls.TRADITIONAL_HINT_CHARS:
-                trad += 1
-            if ch in cls.SIMPLIFIED_HINT_CHARS:
-                simp += 1
 
             if 0xAC00 <= code <= 0xD7A3:
                 hangul += 1
-                signal_chars += 1
-            elif (0x3040 <= code <= 0x309F) or (0x30A0 <= code <= 0x30FF):
-                kana += 1
-                signal_chars += 1
-            elif 0x4E00 <= code <= 0x9FFF:
-                han += 1
                 signal_chars += 1
             elif OCRAgent._is_latin_char(ch):
                 latin += 1
@@ -581,12 +561,8 @@ class OCRAgent:
         denom = float(signal_chars or 1)
         return {
             "hangul_ratio": hangul / denom,
-            "kana_ratio": kana / denom,
-            "han_ratio": han / denom,
             "latin_ratio": latin / denom,
             "spanish_ratio": min(1.0, spanish / denom),
-            "traditional_hint_ratio": min(1.0, trad / denom),
-            "simplified_hint_ratio": min(1.0, simp / denom),
         }
 
     @staticmethod

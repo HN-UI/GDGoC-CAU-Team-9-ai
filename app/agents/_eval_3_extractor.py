@@ -107,7 +107,29 @@ Return JSON only:
 class OCRMenuJudgeAgent:
     """OCR 텍스트 묶음 + 메뉴 이미지를 Gemma에 넣어 라벨링하는 최소 Agent."""
 
-    CHINESE_LANGS = {"ch", "chinese_cht"}
+    SPANISH_LANGS = {"es"}
+    SPANISH_PRICE_SUFFIX_RE = re.compile(
+        r"(?:(?:[|,:]\s*|\s+)\d{1,3}(?:[.,]\d+)?|(?<=\D)\d{1,3}(?:[.,]\d+)?)\s*(?:[A-Z]{1,8}(?:/[A-Z]{1,8})*)?\s*$",
+        re.IGNORECASE,
+    )
+    SPANISH_DESCRIPTION_CUES = (
+        "sauteed",
+        "served",
+        "stuffed",
+        "traditional",
+        "homemade",
+        "delicious",
+        "touch of",
+        "topped with",
+        "mixed with",
+        "deep fried",
+        "fried",
+        "olive oil",
+        "white wine",
+        "sauce",
+        "garlic",
+    )
+
     CHINESE_PRICE_RE = re.compile(r"^(?:[$¥]?\s*)?(?:\d+(?:[.,]\d+)?\s*元?|元+|\d+)$")
     CHINESE_INDEX_RE = re.compile(r"^[\(\[（【]?\s*\d{1,3}\s*[\)\]）】]?$")
     CHINESE_STORE_RE = re.compile(r"(欢迎|歡迎|www\.|nipic|昵图网|by[:：]|no[:：])", re.IGNORECASE)
@@ -245,11 +267,6 @@ class OCRMenuJudgeAgent:
         source_lines = normalized_lines
         normalized_lang = (ocr_lang or "").strip().lower()
 
-        if normalized_lang in self.CHINESE_LANGS:
-            chinese_output = self._run_chinese_layout_strategy(source_lines)
-            if chinese_output.menu_texts:
-                return chinese_output
-
         if use_image_context and image_bytes and image_mime:
             label_map = self._extract_labels_with_image(source_lines, image_bytes, image_mime)
         else:
@@ -262,10 +279,134 @@ class OCRMenuJudgeAgent:
             item = OCRTextLabel(text=line.text, label=label, is_menu=(label == "menu_item"))
             out_items.append(item)
 
-        menu_texts = self._postprocess_menu_texts(
-            [it.text for it in out_items if it.label == "menu_item" and it.is_menu]
-        )
+        menu_candidates = [it.text for it in out_items if it.label == "menu_item" and it.is_menu]
+        if normalized_lang in self.SPANISH_LANGS:
+            # Prefer deterministic price-bearing title extraction for Spanish menus.
+            # This avoids description bleed from LLM labels on bilingual ES/EN boards.
+            spanish_rule_items = self._collect_spanish_title_candidates(source_lines)
+            if spanish_rule_items:
+                menu_candidates = spanish_rule_items
+
+        menu_texts = self._postprocess_menu_texts(menu_candidates)
         return OCRMenuJudgeOutput(items=out_items, menu_texts=menu_texts)
+
+    @classmethod
+    def _collect_spanish_title_candidates(cls, source_lines: List[OCRLine]) -> List[str]:
+        out: List[str] = []
+        seen = set()
+        for idx, line in enumerate(source_lines):
+            title, has_price, may_continue = cls._extract_spanish_title_from_line(line.text)
+            if not has_price:
+                continue
+            if not cls._is_spanish_menu_title_candidate(title):
+                continue
+
+            merged = title
+            if may_continue:
+                continuation = cls._find_spanish_title_continuation(source_lines, idx)
+                if continuation:
+                    merged = f"{merged} {continuation}".strip()
+
+            key = cls._norm(merged)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(merged)
+        return out
+
+    @classmethod
+    def _normalize_spanish_title_candidate(cls, text: str) -> str:
+        title, _, _ = cls._extract_spanish_title_from_line(text)
+        return title
+
+    @classmethod
+    def _extract_spanish_title_from_line(cls, text: str) -> tuple[str, bool, bool]:
+        normalized = " ".join((text or "").split()).strip()
+        if not normalized:
+            return "", False, False
+
+        match = cls.SPANISH_PRICE_SUFFIX_RE.search(normalized)
+        if match is not None:
+            raw_title = normalized[: match.start()].strip()
+            marker_char = normalized[match.start()] if match.start() < len(normalized) else ""
+            may_continue = raw_title.endswith((",", "/", "&")) or marker_char in {",", "/", "&"}
+            normalized = raw_title.rstrip(".,:;|/\\- ").strip()
+            return normalized, True, may_continue
+
+        normalized = normalized.rstrip(".,:;|/\\- ").strip()
+        return normalized, False, False
+
+    @classmethod
+    def _find_spanish_title_continuation(cls, source_lines: List[OCRLine], start_idx: int) -> str:
+        # OCR ordering can interleave columns, so we check a small lookahead window.
+        for offset in (1, 2, 3):
+            idx = start_idx + offset
+            if idx >= len(source_lines):
+                break
+            continuation = cls._normalize_spanish_title_continuation(source_lines[idx].text)
+            if continuation:
+                return continuation
+        return ""
+
+    @classmethod
+    def _is_spanish_menu_title_candidate(cls, text: str) -> bool:
+        if not text:
+            return False
+        if len(text) < 3 or len(text) > 52:
+            return False
+        if text.endswith("."):
+            return False
+
+        lowered = text.casefold()
+        if any(cue in lowered for cue in cls.SPANISH_DESCRIPTION_CUES):
+            return False
+
+        words = text.split()
+        if len(words) > 6:
+            return False
+        if not any(ch.isalpha() for ch in text):
+            return False
+        letters = [ch for ch in text if ch.isalpha()]
+        if letters and len(text) > 12:
+            uppercase_ratio = sum(1 for ch in letters if ch.isupper()) / float(len(letters))
+            if uppercase_ratio >= 0.9:
+                return False
+
+        first = words[0] if words else ""
+        if first and first[0].isalpha() and first[0].islower() and first.casefold() not in {"de", "y", "con"}:
+            return False
+        return True
+
+    @classmethod
+    def _normalize_spanish_title_continuation(cls, text: str) -> str:
+        continuation = " ".join((text or "").split()).strip()
+        if not continuation:
+            return ""
+        _, has_price, _ = cls._extract_spanish_title_from_line(continuation)
+        if has_price:
+            return ""
+        if len(continuation) > 28:
+            return ""
+        lowered = continuation.casefold()
+        if any(cue in lowered for cue in cls.SPANISH_DESCRIPTION_CUES):
+            return ""
+        if continuation.endswith("."):
+            return ""
+        if not any(ch.isalpha() for ch in continuation):
+            return ""
+
+        words = continuation.split()
+        if len(words) > 3:
+            return ""
+        if continuation.startswith("("):
+            return ""
+        if not any(token in continuation for token in (",", " y ", "&", "/")):
+            return ""
+        if continuation[0].isalpha() and not continuation[0].isupper():
+            return ""
+
+        continuation = continuation.rstrip(".,:;|/\\- ").strip()
+        return continuation
 
     @classmethod
     def _run_chinese_layout_strategy(cls, source_lines: List[OCRLine]) -> OCRMenuJudgeOutput:

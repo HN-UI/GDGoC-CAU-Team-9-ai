@@ -66,7 +66,7 @@ def preload_ocr_engines():
 class RankRequest(BaseModel):
     image_url: str = Field(..., description="메뉴판 이미지 URL")
     avoid: List[str] = Field(default_factory=list, description="기피 재료 리스트")
-    user_lang: str = Field("ko", description="사용자/응답 언어(ko/en/cn)")
+    user_lang: str = Field("ko", description="사용자/응답 언어(ko/en/es)")
     menu_country_code: str = Field(
         "AUTO",
         description="메뉴판 OCR 언어 힌트. 모르면 AUTO",
@@ -84,7 +84,7 @@ class TranslateRequest(BaseModel):
 
 class AvoidIntakeRequest(BaseModel):
     user_text: str = Field(..., description="챗봇 사용자 입력 문장")
-    lang: str = Field("ko", description="사용자 언어/응답 언어(ko/en/cn)")
+    lang: str = Field("ko", description="사용자 언어/응답 언어(ko/en/es)")
 
 
 class AvoidIntakeResponse(BaseModel):

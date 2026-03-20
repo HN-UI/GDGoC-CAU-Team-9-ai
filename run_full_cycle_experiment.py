@@ -19,7 +19,7 @@ def build_parser():
     parser.add_argument(
         "--user-lang",
         default="ko",
-        choices=["ko", "en", "cn"],
+        choices=["ko", "en", "es"],
         help="사용자/응답 언어",
     )
     parser.add_argument(
@@ -35,7 +35,7 @@ def build_parser():
     )
     parser.add_argument(
         "--model",
-        default=os.getenv("MODEL_ID", "gemma-3-4b-it"),
+        default=os.getenv("MODEL_ID", "gemma-3-12b-it"),
         help="Gemma 모델 ID",
     )
     parser.add_argument(

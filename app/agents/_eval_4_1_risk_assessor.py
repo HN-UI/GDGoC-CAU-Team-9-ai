@@ -10,7 +10,12 @@ from app.agents._0_contracts import (
     RiskSuspect,
 )
 from app.clients.gemma_client import GemmaClient
-from app.utils.avoid_ingredient_synonyms import canonicalize_avoid_ingredients, get_canonical_ingredient
+from app.utils.avoid_ingredient_synonyms import (
+    canonicalize_avoid_ingredients,
+    find_matching_avoid_canonical,
+    get_canonical_ingredient,
+    get_menu_evidence_catalog,
+)
 from app.utils.parsing import clamp_float, extract_first_json_object, normalize_list
 
 
@@ -21,8 +26,9 @@ def norm(s: str) -> str:
     return s
 
 
-DEFAULT_BATCH_SIZE = 15
+DEFAULT_BATCH_SIZE = 10
 WEAK_INFERENCE_MAX_CONF = 0.45
+MAX_SUSPECTS_PER_ITEM = 10
 SUSPECT_RANK = {
     "direct": 4,
     "alias": 3,
@@ -33,6 +39,8 @@ SUSPECT_RANK = {
 
 
 class RiskAssessAgent:
+    ALL_INGREDIENT_CANONICALS = tuple(sorted(get_menu_evidence_catalog().keys()))
+
     def __init__(self, gemma: GemmaClient, batch_size: int = DEFAULT_BATCH_SIZE):
         self.gemma = gemma
         self.batch_size = max(1, int(batch_size))
@@ -71,10 +79,18 @@ class RiskAssessAgent:
         return RiskAssessOutput(items=merged_items)
 
     def _generate_assessment(self, prompt: str):
-        text = self.gemma.generate_text([prompt], max_output_tokens=2000)
+        text = self.gemma.generate_text([prompt], max_output_tokens=3500)
         data = extract_first_json_object(text)
         if not data or not isinstance(data.get("items"), list):
-            raise ValueError(f"RiskAssess parse failed. RAW: {text[:300]}")
+            repair_prompt = (
+                f"{prompt}\n\n"
+                "Your previous output could not be parsed. "
+                "Return ONLY valid JSON that strictly matches the schema."
+            )
+            retry_text = self.gemma.generate_text([repair_prompt], max_output_tokens=3500)
+            data = extract_first_json_object(retry_text)
+            if not data or not isinstance(data.get("items"), list):
+                raise ValueError(f"RiskAssess parse failed. RAW: {retry_text[:300]}")
         return data
 
     @staticmethod
@@ -189,11 +205,12 @@ class RiskAssessAgent:
             ):
                 best_by_canonical[canonical] = suspect
 
-        return sorted(
+        ranked = sorted(
             best_by_canonical.values(),
             key=lambda s: (SUSPECT_RANK.get(s.evidence_type, 0), s.confidence),
             reverse=True,
         )
+        return ranked[:MAX_SUSPECTS_PER_ITEM]
 
     @staticmethod
     def _coerce_legacy_suspects(raw_item, allowed_canonicals, item_confidence: float):
@@ -249,17 +266,29 @@ class RiskAssessAgent:
         return legacy_suspects
 
     @staticmethod
-    def _build_compat_fields(suspects, display_by_canonical):
+    def _build_compat_fields(suspects, display_by_canonical, allowed_avoid_canonicals):
         matched_avoid = []
         avoid_evidence = []
         suspected_ingredients = []
+        seen_suspects = set()
+        allowed_avoid_canonicals = {
+            str(value).strip().casefold()
+            for value in (allowed_avoid_canonicals or set())
+            if isinstance(value, str) and str(value).strip()
+        }
 
         for suspect in suspects:
-            display_name = display_by_canonical.get(suspect.canonical, suspect.canonical)
+            canonical = (suspect.canonical or "").strip().casefold()
+            if canonical and canonical not in seen_suspects:
+                seen_suspects.add(canonical)
+                suspected_ingredients.append(canonical)
+
+            matched_avoid_canonical = find_matching_avoid_canonical(suspect.canonical, allowed_avoid_canonicals)
+            if matched_avoid_canonical is None:
+                continue
+            display_name = display_by_canonical.get(matched_avoid_canonical, matched_avoid_canonical)
             if display_name not in matched_avoid:
                 matched_avoid.append(display_name)
-            if display_name not in suspected_ingredients:
-                suspected_ingredients.append(display_name)
             avoid_evidence.append(
                 AvoidEvidence(
                     ingredient=display_name,
@@ -278,24 +307,30 @@ class RiskAssessAgent:
         canonical_avoid = [item.casefold() for item in canonical_avoid if isinstance(item, str) and item.strip()]
         canonical_avoid = list(dict.fromkeys(canonical_avoid))
         display_by_canonical = self._build_canonical_display_map(avoid)
-        allowed_canonicals = set(canonical_avoid)
+        allowed_avoid_canonicals = set(canonical_avoid)
+        ingredient_canonicals = list(dict.fromkeys(self.ALL_INGREDIENT_CANONICALS))
+        if not ingredient_canonicals:
+            ingredient_canonicals = list(canonical_avoid)
+        allowed_ingredient_canonicals = set(ingredient_canonicals)
 
         prompt = f"""
-You are a food-risk suspect generator for menu items.
+You are a menu ingredient profiler.
 
 INPUT
 - Menu items (use ONLY these, do not add/remove): {json.dumps(items, ensure_ascii=False)}
-- Allowed avoid canonicals (use ONLY these exact canonical strings in output): {json.dumps(canonical_avoid, ensure_ascii=False)}
+- Allowed ingredient canonicals (use ONLY these exact canonical strings in output): {json.dumps(ingredient_canonicals, ensure_ascii=False)}
 
 TASK
-For each menu item, identify only avoid-ingredient suspects that are plausibly related.
+For each menu item, infer a broad but plausible ingredient set for common recipes of that dish.
+Include not only core components but also likely base/dairy/grain/sauce/fat ingredients when relevant.
+Do NOT optimize for any user avoid list in this step.
 Do NOT output a final risk score.
 
 Top-level confidence:
 - confidence: overall confidence in your menu-level assessment, including empty suspect lists.
 
 Each suspect must contain:
-- canonical: one of the allowed canonical strings
+- canonical: one of the allowed ingredient canonical strings
 - evidence_type: one of ["direct", "alias", "menu_prior", "weak_inference", "none"]
 - evidence_text: exact menu substring when there is direct textual support; otherwise null
 - reason: short explanation
@@ -309,22 +344,25 @@ Evidence type definitions:
 - none: no meaningful relation; prefer omitting the suspect instead of using this
 
 IMPORTANT
-- Rule 1: Only judge canonicals from the allowed canonical list. Do not invent new canonicals.
+- Rule 1: Only judge canonicals from the allowed ingredient canonical list. Do not invent new canonicals.
 - Rule 2: Every suspect must include canonical, evidence_type, evidence_text, and confidence.
 - Rule 3: direct is allowed only when evidence_text is an exact substring of the menu string itself.
 - Rule 4: If you only have general recipe intuition, use weak_inference only. Do not present it as certain.
 - Rule 5: If you do not know, prefer suspects: [] or lower confidence. Do not force a match.
-- If there is no plausible relation to the allowed canonical list, return suspects: [].
+- If there is no plausible relation to the allowed ingredient canonical list, return suspects: [].
 - Do NOT output unrelated canonicals.
+- Keep suspects concise (prefer up to 10 ingredients per menu).
+- Prefer specific child canonicals over broad parent labels (e.g., milk/cheese/butter > dairy).
 - Do NOT output a final risk score.
 - You must return exactly one output item for each input menu item.
 - Keep the same order as the input list.
 - Do not skip any item.
 - Do not merge or split menu items.
-- Prefer precision over recall: avoid false positives even if that means returning no match more often.
-- If the evidence is weak or ambiguous, prefer weak_inference or no suspect over a false positive.
+- Balance precision and recall: include plausibly related ingredients when recipe likelihood is meaningful.
+- If the evidence is weak or ambiguous, use weak_inference with a clear reason.
 - For direct or alias, provide evidence_text as the exact menu substring that supports the suspect whenever possible.
 - If you cannot point to an exact menu substring, do NOT use direct. Use menu_prior or weak_inference instead.
+- You may include common dish-level ingredients even when not explicitly written (e.g., pizza often includes cheese) using menu_prior or weak_inference.
 
 For "menu_name", copy the menu name EXACTLY from the input list (character-by-character). Do not translate or modify.
 
@@ -381,14 +419,18 @@ OUTPUT: Return ONLY valid JSON (no markdown) with this schema:
 
             conf = clamp_float(it.get("confidence", 0.0), 0.0, 1.0, 0.0)
             raw_suspects = it.get("suspects", [])
-            suspects = self._normalize_suspects(raw_suspects, allowed_canonicals, menu)
+            suspects = self._normalize_suspects(raw_suspects, allowed_ingredient_canonicals, menu)
             if not suspects:
                 suspects = self._normalize_suspects(
-                    self._coerce_legacy_suspects(it, allowed_canonicals, conf),
-                    allowed_canonicals,
+                    self._coerce_legacy_suspects(it, allowed_ingredient_canonicals, conf),
+                    allowed_ingredient_canonicals,
                     menu,
                 )
-            matched, avoid_evidence, suspected = self._build_compat_fields(suspects, display_by_canonical)
+            matched, avoid_evidence, suspected = self._build_compat_fields(
+                suspects,
+                display_by_canonical,
+                allowed_avoid_canonicals,
+            )
 
             by_menu[menu] = (
                 RiskItem(

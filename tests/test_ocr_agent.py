@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from app.agents._0_contracts import OCROptions
+from app.agents._0_contracts import OCRLanguageCandidate, OCROptions
 from app.agents._eval_2_ocr import OCRAgent
 
 
@@ -14,6 +14,28 @@ class _FakeEngine:
 
 
 class OCRAgentTest(unittest.TestCase):
+    def test_sort_candidates_prefers_spanish_when_scores_tie(self):
+        candidates = [
+            OCRLanguageCandidate(lang="en", score=1.0, line_count=80, avg_confidence=0.93, script_ratio=1.0),
+            OCRLanguageCandidate(lang="es", score=1.0, line_count=80, avg_confidence=0.93, script_ratio=1.0),
+        ]
+        ordered = OCRAgent._sort_candidates(candidates)
+        self.assertEqual([item.lang for item in ordered], ["es", "en"])
+
+    def test_default_auto_langs_only_include_korean_english_spanish(self):
+        self.assertEqual(OCRAgent.DEFAULT_AUTO_LANGS, ("korean", "en", "es"))
+
+    def test_probe_languages_filter_out_unsupported_langs(self):
+        langs = OCRAgent._normalize_probe_languages(["korean", "ch", "en", "es", "japan"])
+        self.assertEqual(langs, ["korean", "en", "es"])
+
+    def test_resolve_lang_only_accepts_supported_overrides(self):
+        self.assertEqual(OCRAgent._resolve_lang(menu_country_code=None, ocr_lang_override="ko"), "korean")
+        self.assertEqual(OCRAgent._resolve_lang(menu_country_code=None, ocr_lang_override="en"), "en")
+        self.assertEqual(OCRAgent._resolve_lang(menu_country_code=None, ocr_lang_override="es"), "es")
+        self.assertIsNone(OCRAgent._resolve_lang(menu_country_code=None, ocr_lang_override="ch"))
+        self.assertIsNone(OCRAgent._resolve_lang(menu_country_code="CN", ocr_lang_override=None))
+
     def _dummy_image_bytes(self):
         try:
             cv2 = __import__("cv2")

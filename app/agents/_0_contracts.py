@@ -4,7 +4,7 @@ from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
-SupportedLang = Literal["ko", "en", "cn", ]
+SupportedLang = Literal["ko", "en", "es"]
 
 
 class ExtractInput(BaseModel):

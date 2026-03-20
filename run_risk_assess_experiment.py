@@ -38,7 +38,7 @@ def build_parser():
     parser.add_argument(
         "--user-lang",
         default="ko",
-        choices=["ko", "en", "cn"],
+        choices=["ko", "en", "es"],
         help="출력 표시 언어",
     )
     parser.add_argument("--menu-country-code", default="AUTO", help="메뉴판 OCR 언어 힌트. 모르면 AUTO")

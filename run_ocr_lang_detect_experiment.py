@@ -34,7 +34,7 @@ def build_parser():
         "--langs",
         nargs="*",
         default=list(OCRAgent.DEFAULT_AUTO_LANGS),
-        help="자동 감지 후보 언어 목록. 예: --langs korean ch en",
+        help="자동 감지 후보 언어 목록. 예: --langs korean en es",
     )
     parser.add_argument("--min-confidence", type=float, default=0.5, help="OCR confidence 임계값")
     parser.add_argument("--top", type=int, default=12, help="언어별 샘플 OCR 라인 최대 출력 수")

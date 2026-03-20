@@ -6,6 +6,7 @@ from app.utils.avoid_ingredient_synonyms import (
     build_canonical_display_map,
     canonicalize_avoid_ingredients,
     find_matching_avoid_canonical,
+    get_canonical_ingredient,
     get_canonical_ancestors,
     get_display_name,
     get_menu_evidence_catalog,
@@ -14,6 +15,7 @@ from app.utils.avoid_ingredient_synonyms import (
 
 
 WEAK_INFERENCE_MAX_CONFIDENCE = 0.45
+RELATION_FALLBACK_MIN_CONFIDENCE = 0.6
 EVIDENCE_RANK = {
     "direct": 4,
     "alias": 3,
@@ -52,9 +54,11 @@ def _verify_suspect(menu_name: str, suspect: RiskSuspect, evidence_catalog: dict
     direct_terms = entry.get("direct", [])
     strong_terms = entry.get("strong", [])
     prior_terms = entry.get("prior", [])
+    weak_terms = entry.get("weak", [])
     direct_hit_menu = _match_any(menu_name, direct_terms)
     alias_hit_menu = _match_any(menu_name, strong_terms)
     prior_hit_menu = _match_any(menu_name, prior_terms)
+    weak_hit_menu = _match_any(menu_name, weak_terms)
 
     evidence_text = (suspect.evidence_text or "").strip() or None
     if evidence_text and not _contains_term(menu_name, evidence_text):
@@ -81,6 +85,8 @@ def _verify_suspect(menu_name: str, suspect: RiskSuspect, evidence_catalog: dict
         if not alias_hit:
             alias_hit = alias_hit_menu
         if not alias_hit:
+            if not weak_hit_menu:
+                return None
             return RiskSuspect(
                 canonical=canonical,
                 evidence_type="weak_inference",
@@ -98,8 +104,26 @@ def _verify_suspect(menu_name: str, suspect: RiskSuspect, evidence_catalog: dict
         )
 
     if evidence_type == "menu_prior":
+        if direct_hit_menu:
+            return RiskSuspect(
+                canonical=canonical,
+                evidence_type="direct",
+                evidence_text=direct_hit_menu,
+                reason=suspect.reason,
+                confidence=max(confidence, 0.85),
+            )
+        if alias_hit_menu:
+            return RiskSuspect(
+                canonical=canonical,
+                evidence_type="alias",
+                evidence_text=alias_hit_menu,
+                reason=suspect.reason,
+                confidence=max(confidence, 0.75),
+            )
         prior_hit = prior_hit_menu
         if not prior_hit:
+            if not weak_hit_menu:
+                return None
             return RiskSuspect(
                 canonical=canonical,
                 evidence_type="weak_inference",
@@ -141,15 +165,107 @@ def _verify_suspect(menu_name: str, suspect: RiskSuspect, evidence_catalog: dict
                 reason=suspect.reason,
                 confidence=max(confidence, 0.6),
             )
-        return RiskSuspect(
-            canonical=canonical,
-            evidence_type="weak_inference",
-            evidence_text=None,
-            reason=suspect.reason,
-            confidence=min(confidence, WEAK_INFERENCE_MAX_CONFIDENCE),
-        )
+        if weak_hit_menu:
+            return RiskSuspect(
+                canonical=canonical,
+                evidence_type="weak_inference",
+                evidence_text=weak_hit_menu,
+                reason=suspect.reason,
+                confidence=min(confidence, WEAK_INFERENCE_MAX_CONFIDENCE),
+            )
+        return None
 
     return None
+
+
+def _canonical_match_relation(source_canonical: str, target_canonical: str) -> str:
+    source = (source_canonical or "").strip().casefold()
+    target = (target_canonical or "").strip().casefold()
+    if not source or not target:
+        return "none"
+    if source == target:
+        return "exact"
+
+    source_ancestors = set(get_canonical_ancestors(source))
+    target_ancestors = set(get_canonical_ancestors(target))
+    if target in source_ancestors:
+        return "child_to_parent"
+    if source in target_ancestors:
+        return "parent_to_child"
+    if source_ancestors & target_ancestors:
+        return "sibling_family"
+    return "none"
+
+
+def _has_canonical_menu_signal(menu_name: str, canonical: str, evidence_catalog: dict) -> bool:
+    canonical_norm = (canonical or "").strip().casefold()
+    if not canonical_norm:
+        return False
+
+    entry = evidence_catalog.get(canonical_norm, {})
+    terms: List[str] = []
+    for section in ("direct", "strong", "prior"):
+        values = entry.get(section, [])
+        if isinstance(values, list):
+            terms.extend(value for value in values if isinstance(value, str))
+    return _match_any(menu_name, terms) is not None
+
+
+def _has_relation_menu_signal(
+    menu_name: str,
+    source_canonical: str,
+    target_canonical: str,
+    evidence_catalog: dict,
+) -> bool:
+    candidates = [source_canonical, target_canonical]
+    candidates.extend(get_canonical_ancestors(source_canonical))
+    candidates.extend(get_canonical_ancestors(target_canonical))
+
+    seen = set()
+    for candidate in candidates:
+        candidate_norm = (candidate or "").strip().casefold()
+        if not candidate_norm or candidate_norm in seen:
+            continue
+        seen.add(candidate_norm)
+        if _has_canonical_menu_signal(menu_name, candidate_norm, evidence_catalog):
+            return True
+    return False
+
+
+def _fallback_verify_by_relation(
+    menu_name: str,
+    suspect: RiskSuspect,
+    relation: str,
+    matched_canonical: str,
+    evidence_catalog: dict,
+) -> RiskSuspect | None:
+    if relation not in {"child_to_parent", "parent_to_child", "sibling_family"}:
+        return None
+    if suspect.evidence_type != "menu_prior":
+        return None
+    if float(suspect.confidence) < RELATION_FALLBACK_MIN_CONFIDENCE:
+        return None
+
+    source_canonical = (suspect.canonical or "").strip().casefold()
+    target_canonical = (matched_canonical or "").strip().casefold()
+    if not _has_relation_menu_signal(menu_name, source_canonical, target_canonical, evidence_catalog):
+        return None
+
+    relation_reason = {
+        "child_to_parent": "ingredient-family linked match (child->parent)",
+        "parent_to_child": "ingredient-family linked match (parent->child)",
+        "sibling_family": "ingredient-family linked match (sibling)",
+    }.get(relation, "ingredient-family linked match")
+    base_reason = (suspect.reason or "").strip()
+    reason = f"{base_reason} ({relation_reason})" if base_reason else relation_reason
+
+    return RiskSuspect(
+        canonical=source_canonical,
+        evidence_type="weak_inference",
+        evidence_text=None,
+        reason=reason,
+        confidence=min(WEAK_INFERENCE_MAX_CONFIDENCE, max(0.35, suspect.confidence)),
+    )
 
 
 def _detect_strong_menu_canonicals(menu_name: str, evidence_catalog: dict) -> set[str]:
@@ -184,7 +300,12 @@ def _resolve_canonical_conflicts(
             suspect.evidence_type == "weak_inference"
             and suspect.canonical not in strong_menu_canonicals
         ):
-            continue
+            # exact 약한 추론은 메뉴의 strong 시그널이 없으면 제거하되,
+            # 계열 매칭(예: dairy -> milk)으로 확장된 보수 매칭은 유지한다.
+            matched_norm = (matched_canonical or "").strip().casefold()
+            suspect_norm = (suspect.canonical or "").strip().casefold()
+            if matched_norm == suspect_norm:
+                continue
         filtered.append((matched_canonical, suspect))
     return filtered
 
@@ -283,7 +404,16 @@ def verify_risk_items(risk_items: List[RiskItem], avoid_terms: List[str], lang: 
             matched_avoid_canonical = find_matching_avoid_canonical(suspect.canonical, allowed_canonicals)
             if matched_avoid_canonical is None:
                 continue
+            relation = _canonical_match_relation(suspect.canonical, matched_avoid_canonical)
             verified = _verify_suspect(item.menu, suspect, evidence_catalog)
+            if verified is None:
+                verified = _fallback_verify_by_relation(
+                    item.menu,
+                    suspect,
+                    relation,
+                    matched_avoid_canonical,
+                    evidence_catalog,
+                )
             if verified is not None:
                 verified_pairs.append((matched_avoid_canonical, verified))
 
@@ -294,6 +424,16 @@ def verify_risk_items(risk_items: List[RiskItem], avoid_terms: List[str], lang: 
         matched_avoid: List[str] = []
         avoid_evidence: List[AvoidEvidence] = []
         suspected_ingredients: List[str] = []
+        for raw_suspected in item.suspected_ingredients:
+            if not isinstance(raw_suspected, str):
+                continue
+            cleaned = raw_suspected.strip()
+            if not cleaned:
+                continue
+            canonical = get_canonical_ingredient(cleaned, mode="input") or cleaned.casefold()
+            display_name = get_display_name(canonical, lang=lang) if canonical in evidence_catalog else cleaned
+            if display_name not in suspected_ingredients:
+                suspected_ingredients.append(display_name)
         inferred_menu_canonicals = _infer_menu_ingredient_canonicals(item.menu, evidence_catalog)
         for canonical in inferred_menu_canonicals:
             display_name = display_by_requested_canonical.get(

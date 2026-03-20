@@ -49,7 +49,7 @@ class MenuAgentOrchestrator:
         menu_country_code: str = "AUTO",
     ) -> FinalResponse:
         requested_user_lang = (user_lang or "ko").strip().lower()
-        lang = requested_user_lang if requested_user_lang in {"ko", "en", "cn"} else "ko"
+        lang = requested_user_lang if requested_user_lang in {"ko", "en", "es"} else "ko"
         t_total = time.perf_counter()
         timings_ms = {}
 
@@ -203,16 +203,13 @@ class MenuAgentOrchestrator:
     def _resolve_menu_country_code(detected_ocr_lang: str) -> str:
         mapping = {
             "korean": "KR",
-            "japan": "JP",
-            "ch": "CN",
-            "chinese_cht": "TW",
             "en": "US",
             "es": "ES",
         }
         return mapping.get((detected_ocr_lang or "").strip().lower(), "")
 
     def _localize_item_menus(self, items: List[ScoredItem], lang: str) -> None:
-        target_lang = lang if lang in {"ko", "en", "cn"} else "en"
+        target_lang = lang if lang in {"ko", "en", "es"} else "en"
         if not items:
             return
 
@@ -264,24 +261,22 @@ class MenuAgentOrchestrator:
             return False
         if target_lang == "ko":
             return any("\uac00" <= ch <= "\ud7a3" for ch in text)
-        if target_lang == "cn":
-            return any("\u4e00" <= ch <= "\u9fff" for ch in text)
         return False
 
     def _localize_item_reasons(self, items: List[ScoredItem], lang: str) -> None:
-        target_lang = lang if lang in {"ko", "en", "cn"} else "en"
+        target_lang = lang if lang in {"ko", "en", "es"} else "en"
         if not items:
             return
 
         no_match_reason = {
             "ko": "뚜렷한 기피 재료는 확인되지 않았어요. 다만 정보가 부족해 점수는 보수적으로 계산했어요.",
             "en": "We could not clearly confirm any avoid ingredients. Since the information is limited, the score was calculated conservatively.",
-            "cn": "暂未明确发现忌口成分，但由于信息有限，分数已按保守方式计算。",
+            "es": "No pudimos confirmar con claridad ingredientes a evitar. Como la informacion es limitada, la puntuacion se calculo de forma conservadora.",
         }[target_lang]
         failure_reason = {
             "ko": "메뉴 정보를 충분히 읽지 못해 점수를 조금 더 조심스럽게 계산했어요.",
             "en": "We could not read enough menu information, so the score was calculated a bit more cautiously.",
-            "cn": "由于未能充分读取菜单信息，分数采用了更谨慎的计算方式。",
+            "es": "No pudimos leer suficiente informacion del menu, asi que la puntuacion se calculo con un poco mas de cautela.",
         }[target_lang]
 
         # 변경 배경:
@@ -361,7 +356,7 @@ class MenuAgentOrchestrator:
         user_text: str,
         lang: str = "ko",
     ):
-        lang = lang if lang in {"ko", "en", "cn"} else "ko"
+        lang = lang if lang in {"ko", "en", "es"} else "ko"
         return self.avoid_intake_agent.run(AvoidIntakeInput(user_text=user_text, lang=lang))
 
 
